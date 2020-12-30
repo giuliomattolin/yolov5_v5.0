@@ -643,7 +643,7 @@ def augment_hsv(img, hgain=0.5, sgain=0.5, vgain=0.5):
     #         img[:, :, i] = cv2.equalizeHist(img[:, :, i])
 
 
-def load_mosaic(self, index):
+def load_mosaic4(self, index):
     # loads images in a mosaic
 
     labels4 = []
@@ -701,7 +701,7 @@ def load_mosaic(self, index):
     return img4, labels4
 
 
-def load_mosaic9(self, index):
+def load_mosaic(self, index):
     # loads images in a 9-mosaic
 
     labels9 = []
