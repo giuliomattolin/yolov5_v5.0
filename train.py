@@ -129,6 +129,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     # https://pytorch.org/docs/stable/_modules/torch/optim/lr_scheduler.html#OneCycleLR
     lf = lambda x: ((1 + math.cos(x * math.pi / epochs)) / 2) * (1 - hyp['lrf']) + hyp['lrf']  # cosine 1->hyp['lrf']
     scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
+    scheduler_wd = lambda x: 0.5 - math.cos(x * math.pi / epochs) / 2  # cosine 0->1
     # plot_lr_scheduler(optimizer, scheduler, epochs)
 
     # Logging
@@ -331,6 +332,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         # Scheduler
         lr = [x['lr'] for x in optimizer.param_groups]  # for tensorboard
         scheduler.step()
+        optimizer.param_groups[1]['weight_decay'] = hyp['weight_decay'] * scheduler_wd(epoch)
 
         # DDP process 0 or single-GPU
         if rank in [-1, 0]:
