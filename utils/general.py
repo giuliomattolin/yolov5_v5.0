@@ -209,6 +209,7 @@ def bbox_iou(box1, box2, x1y1x2y2=True, GIoU=False, DIoU=False, CIoU=False, IR=T
     w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + eps
     union = w1 * h1 + w2 * h2 - inter + eps
 
+    # Area Ratio Loss(experimental): proposed by greyman-seu(zhuyangkun@seu.edu.cn).
     if IR:
         target_area = w2 * h2 + eps
         predict_area = w1 * h1 + eps
