@@ -106,6 +106,7 @@ def compute_loss(p, targets, model):  # predictions, targets, model
     # Losses
     nt = 0  # number of targets
     balance = [4.0, 1.0, 0.3, 0.1, 0.03]  # P3-P7
+    x = []
     for i, pi in enumerate(p):  # layer index, layer predictions
         b, a, gj, gi = indices[i]  # image, anchor, gridy, gridx
         tobj = torch.zeros_like(pi[..., 0], device=device)  # target obj
@@ -135,7 +136,12 @@ def compute_loss(p, targets, model):  # predictions, targets, model
             # with open('targets.txt', 'a') as file:
             #     [file.write('%11.5g ' * 4 % tuple(x) + '\n') for x in torch.cat((txy[i], twh[i]), 1)]
 
+        x.append(BCEobj(pi[..., 4], tobj).detach().tolist())
         lobj += BCEobj(pi[..., 4], tobj) * balance[i]  # obj loss
+
+    # Append targets to text file
+    with open('targets.txt', 'a') as file:
+        file.write('%11.5g ' * len(x) % tuple(x) + '\n')
 
     lbox *= h['box']
     lobj *= h['obj']
