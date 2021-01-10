@@ -136,7 +136,7 @@ def compute_loss(p, targets, model):  # predictions, targets, model
             # with open('targets.txt', 'a') as file:
             #     [file.write('%11.5g ' * 4 % tuple(x) + '\n') for x in torch.cat((txy[i], twh[i]), 1)]
 
-        x.append(BCEobj(pi[..., 4], tobj).detach().tolist())
+        x.append(n)
         lobj += BCEobj(pi[..., 4], tobj) * balance[i]  # obj loss
 
     # Append targets to text file
