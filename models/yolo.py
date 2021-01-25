@@ -36,7 +36,7 @@ class Detect(nn.Module):
         self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
         # self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv
         nt = self.no * self.na  # total outputs
-        self.m = nn.ModuleList(C3out(x, nt, 3, False) for x in ch)
+        self.m = nn.ModuleList(C3out(x, nt, 1, False) for x in ch)
         self.m[-1] = nn.Conv2d(ch[-1], nt, 1)
 
     def forward(self, x):
