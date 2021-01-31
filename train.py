@@ -360,13 +360,13 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 os.system('gsutil cp %s gs://%s/results/results%s.txt' % (results_file, opt.bucket, opt.name))
 
             # Log
-            tags = ['train/box_loss3', 'train/box_loss4', 'train/box_loss5', 'train/box_loss6',  # train loss
-                    'train/obj_loss3', 'train/obj_loss4', 'train/obj_loss5', 'train/obj_loss6',  # train loss
-                    'train/cls_loss3', 'train/cls_loss4', 'train/cls_loss5', 'train/cls_loss6',  # train loss
+            tags = ['train/box_loss3', 'train/box_loss4', 'train/box_loss5',  # train loss
+                    'train/obj_loss3', 'train/obj_loss4', 'train/obj_loss5',  # train loss
+                    'train/cls_loss3', 'train/cls_loss4', 'train/cls_loss5',  # train loss
                     'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
-                    'val/box_loss3', 'val/box_loss4', 'val/box_loss5', 'val/box_loss6',  # train loss
-                    'val/obj_loss3', 'val/obj_loss4', 'val/obj_loss5', 'val/obj_loss6',  # train loss
-                    'val/cls_loss3', 'val/cls_loss4', 'val/cls_loss5', 'val/cls_loss6',  # train loss
+                    'val/box_loss3', 'val/box_loss4', 'val/box_loss5',  # train loss
+                    'val/obj_loss3', 'val/obj_loss4', 'val/obj_loss5',  # train loss
+                    'val/cls_loss3', 'val/cls_loss4', 'val/cls_loss5',  # train loss
                     'x/lr0', 'x/lr1', 'x/lr2']  # params
             for x, tag in zip(list(mloss[:-1]) + list(results) + lr, tags):
                 if tb_writer:
