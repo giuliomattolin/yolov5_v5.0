@@ -218,7 +218,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         n = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in [Conv, GhostConv, Bottleneck, GhostBottleneck, SPP, DWConv, MixConv2d, Focus, CrossConv, BottleneckCSP,
                  C3]:
-            c1, c2 = ch[f], args[0]
+            c1, c2 = ch[f if f < 0 else f + 1], args[0]
 
             # Normal
             # if i > 0 and args[0] != no:  # channel expansion factor
@@ -270,7 +270,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cfg', type=str, default='yolov5l6d-640.yaml', help='model.yaml')
+    parser.add_argument('--cfg', type=str, default='yolov5l6d2-640.yaml', help='model.yaml')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     opt = parser.parse_args()
     opt.cfg = check_file(opt.cfg)  # check file
