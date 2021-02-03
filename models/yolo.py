@@ -41,10 +41,15 @@ class Detect(nn.Module):
         z = []  # inference output
         self.training |= self.export
         for i in range(self.nl):
-            x[i] = self.m[i](x[i])  # conv
-            bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
-            x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
+            a = self.m[i](x[i])  # conv
+            bs, _, ny, nx = a.shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
+            a = a.view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2)
 
+            b = self.m[i + self.nl](x[i + self.nl])  # conv
+            b = b.view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2)
+
+            b[..., :4] = a[..., :4]
+            x[i] = b.contiguous()
             if not self.training:  # inference
                 if self.grid[i].shape[2:4] != x[i].shape[2:4]:
                     self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
@@ -54,6 +59,7 @@ class Detect(nn.Module):
                 y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
                 z.append(y.view(bs, -1, self.no))
 
+        x = x[:self.nl]
         return x if self.training else (torch.cat(z, 1), x)
 
     @staticmethod
@@ -143,7 +149,7 @@ class Model(nn.Module):
         # https://arxiv.org/abs/1708.02002 section 3.3
         # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1.
         m = self.model[-1]  # Detect() module
-        for mi, s in zip(m.m, m.stride):  # from
+        for mi, s in zip(m.m, torch.cat([m.stride, m.stride])):  # from
             b = mi.bias.view(m.na, -1)  # conv.bias(255) to (3,85)
             b.data[:, 4] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
             b.data[:, 5:] += math.log(0.6 / (m.nc - 0.99)) if cf is None else torch.log(cf / cf.sum())  # cls
@@ -264,7 +270,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cfg', type=str, default='yolov5s.yaml', help='model.yaml')
+    parser.add_argument('--cfg', type=str, default='yolov5l6d.yaml', help='model.yaml')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     opt = parser.parse_args()
     opt.cfg = check_file(opt.cfg)  # check file
