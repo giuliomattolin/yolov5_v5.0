@@ -420,7 +420,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                                           batch_size=batch_size * 2,
                                           imgsz=imgsz_test,
                                           conf_thres=0.001,
-                                          iou_thres=0.65,
+                                          iou_thres=0.70,
                                           model=attempt_load(m, device).half(),
                                           single_cls=opt.single_cls,
                                           dataloader=testloader,
