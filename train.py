@@ -4,6 +4,7 @@ import math
 import os
 import random
 import time
+from copy import deepcopy
 from pathlib import Path
 from threading import Thread
 
@@ -19,7 +20,6 @@ from torch.cuda import amp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from copy import deepcopy
 
 import test  # import test.py to get mAP after each epoch
 from models.experimental import attempt_load
@@ -134,6 +134,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         wandb_run = wandb.init(config=opt, resume="allow",
                                project='YOLOv5' if opt.project == 'runs/train' else Path(opt.project).stem,
                                name=save_dir.stem,
+                               entity=opt.entity,
                                id=ckpt.get('wandb_id') if 'ckpt' in locals() else None)
     loggers = {'wandb': wandb}  # loggers dict
 
@@ -382,7 +383,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 ckpt = {'epoch': epoch,
                         'best_fitness': best_fitness,
                         'training_results': results_file.read_text(),
-                        'model': deepcopy(model.module if is_parallel(model) else model).half(),
+                        'model': ema.ema if final_epoch else deepcopy(
+                            model.module if is_parallel(model) else model).half(),
                         'ema': (deepcopy(ema.ema).half(), ema.updates),
                         'optimizer': optimizer.state_dict(),
                         'wandb_id': wandb_run.id if wandb else None}
@@ -467,6 +469,7 @@ if __name__ == '__main__':
     parser.add_argument('--log-artifacts', action='store_true', help='log artifacts, i.e. final trained model')
     parser.add_argument('--workers', type=int, default=8, help='maximum number of dataloader workers')
     parser.add_argument('--project', default='runs/train', help='save to project/name')
+    parser.add_argument('--entity', default=None, help='W&B entity')
     parser.add_argument('--name', default='exp', help='save to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--quad', action='store_true', help='quad dataloader')

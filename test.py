@@ -269,6 +269,7 @@ def test(data,
             print(f'pycocotools unable to run: {e}')
 
     # Return results
+    model.float()  # for training
     if not training:
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
         print(f"Results saved to {save_dir}{s}")
@@ -326,6 +327,7 @@ if __name__ == '__main__':
             test(opt.data, w, opt.batch_size, opt.img_size, 0.25, 0.45, save_json=False, plots=False)
 
     elif opt.task == 'study':  # run over a range of settings and save/plot
+        # python test.py --task study --data coco.yaml --iou 0.7 --weights yolov5s.pt yolov5m.pt yolov5l.pt yolov5x.pt
         x = list(range(256, 1536 + 128, 128))  # x axis (image sizes)
         for w in opt.weights:
             f = f'study_{Path(opt.data).stem}_{Path(w).stem}.txt'  # filename to save to
