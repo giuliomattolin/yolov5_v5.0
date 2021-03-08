@@ -58,7 +58,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     # Configure
     plots = not opt.evolve  # create plots
     cuda = device.type != 'cpu'
-    init_seeds(0 if opt.evolve else 2 + rank)
+    init_seeds(2 + rank, deterministic=opt.evolve)
     with open(opt.data) as f:
         data_dict = yaml.load(f, Loader=yaml.SafeLoader)  # data dict
     with torch_distributed_zero_first(rank):

@@ -34,10 +34,10 @@ def torch_distributed_zero_first(local_rank: int):
         torch.distributed.barrier()
 
 
-def init_torch_seeds(seed=0):
+def init_torch_seeds(seed=0, deterministic=False):
     # Speed-reproducibility tradeoff https://pytorch.org/docs/stable/notes/randomness.html
     torch.manual_seed(seed)
-    if seed == 0:  # slower, more reproducible
+    if deterministic or seed == 0:  # slower, more reproducible
         cudnn.benchmark, cudnn.deterministic = False, True
     else:  # faster, less reproducible
         cudnn.benchmark, cudnn.deterministic = True, False
