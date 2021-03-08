@@ -39,6 +39,7 @@ def init_torch_seeds(seed=0):
     torch.manual_seed(seed)
     if seed == 0:  # slower, more reproducible
         cudnn.benchmark, cudnn.deterministic = False, True
+        torch.use_deterministic_algorithms(True)
     else:  # faster, less reproducible
         cudnn.benchmark, cudnn.deterministic = True, False
 
