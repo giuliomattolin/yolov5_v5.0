@@ -355,10 +355,6 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                                                  log_imgs=opt.log_imgs if wandb else 0,
                                                  compute_loss=compute_loss)
 
-            # Write
-            with open(results_file, 'a') as f:
-                f.write(s + '%10.4g' * 7 % results + '\n')  # append metrics, val_loss
-
             # Log
             tags = ['train/box_loss', 'train/obj_loss', 'train/cls_loss',  # train loss
                     'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
@@ -369,6 +365,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                     tb_writer.add_scalar(tag, x, epoch)  # tensorboard
                 if wandb:
                     wandb.log({tag: x}, step=epoch, commit=tag == tags[-1])  # W&B
+            with open(results_file, 'a') as f:
+                f.write(s + '%10.4g' * 7 % results + '\n')  # append
 
             # Update best mAP
             fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
