@@ -114,9 +114,12 @@ def test(data,
             # Run model
             t = time_synchronized()
             with amp.autocast(enabled=cuda):
-                print(img.dtype)
-                model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
-                model(img.to(device).float())
+                img2 = torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters()))
+                print(img.shape, img.device, img.dtype)
+                print(img2.shape, img2.device, img2.dtype)
+
+                model(img2)
+                model(img)
 
 
                 out, train_out = model(img, augment=augment)  # inference and training outputs
