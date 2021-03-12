@@ -7,6 +7,7 @@ from threading import Thread
 import numpy as np
 import torch
 import yaml
+from torch.cuda import amp
 from tqdm import tqdm
 
 from models.experimental import attempt_load
@@ -60,6 +61,7 @@ def test(data,
             model = torch.nn.DataParallel(model)
 
     # Half
+    cuda = device.type != 'cpu'
     half = device.type != 'cpu'  # half precision only supported on CUDA
     if half:
         model.half()
@@ -107,7 +109,8 @@ def test(data,
         with torch.no_grad():
             # Run model
             t = time_synchronized()
-            out, train_out = model(img, augment=augment)  # inference and training outputs
+            with amp.autocast(enabled=cuda):
+                out, train_out = model(img, augment=augment)  # inference and training outputs
             t0 += time_synchronized() - t
 
             # Compute loss
