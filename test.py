@@ -56,15 +56,15 @@ def test(data,
         gs = max(int(model.stride.max()), 32)  # grid size (max stride)
         imgsz = check_img_size(imgsz, s=gs)  # check img_size
 
-        # Multi-GPU disabled, incompatible with .half() https://github.com/ultralytics/yolov5/issues/99
-        if device.type != 'cpu' and torch.cuda.device_count() > 1:
-            model = torch.nn.DataParallel(model)
-
     # Half
     cuda = device.type != 'cpu'
     half = device.type != 'cpu'  # half precision only supported on CUDA
     if half:
         model.half()
+
+    # Multi-GPU disabled, incompatible with .half() https://github.com/ultralytics/yolov5/issues/99
+    if device.type != 'cpu' and torch.cuda.device_count() > 1:
+        model = torch.nn.DataParallel(model)
 
     # Configure
     model.eval()
