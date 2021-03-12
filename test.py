@@ -58,9 +58,9 @@ def test(data,
 
     # Half
     cuda = device.type != 'cpu'
-    half = device.type != 'cpu'  # half precision only supported on CUDA
-    if half:
-        model.half()
+    half = False # device.type != 'cpu'  # half precision only supported on CUDA
+    #if half:
+    #    model.half()
 
     # Multi-GPU disabled, incompatible with .half() https://github.com/ultralytics/yolov5/issues/99
     if device.type != 'cpu' and torch.cuda.device_count() > 1:
