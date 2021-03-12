@@ -7,7 +7,6 @@ from threading import Thread
 import numpy as np
 import torch
 import yaml
-from torch.cuda import amp
 from tqdm import tqdm
 
 from models.experimental import attempt_load
@@ -56,16 +55,15 @@ def test(data,
         gs = max(int(model.stride.max()), 32)  # grid size (max stride)
         imgsz = check_img_size(imgsz, s=gs)  # check img_size
 
-    # Half
-    cuda = device.type != 'cpu'
-    half = False # device.type != 'cpu'  # half precision only supported on CUDA
-    #if half:
-    #    model.half()
+        # Multi-GPU disabled, incompatible with .half() https://github.com/ultralytics/yolov5/issues/99
+        # if device.type != 'cpu' and torch.cuda.device_count() > 1:
+        #     model = nn.DataParallel(model)
 
-    # Multi-GPU disabled, incompatible with .half() https://github.com/ultralytics/yolov5/issues/99
-    if device.type != 'cpu' and torch.cuda.device_count() > 1:
-        model = torch.nn.DataParallel(model, device_ids=[0, 1])
-        model = model.to(device)
+    # Half
+    half = False # device.type != 'cpu'  # half precision only supported on CUDA
+    cuda = device.type != 'cpu'
+    if half:
+        model.half()
 
     # Configure
     model.eval()
@@ -87,13 +85,10 @@ def test(data,
     # Dataloader
     if not training:
         if device.type != 'cpu':
-           model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
+            model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
         path = data['test'] if opt.task == 'test' else data['val']  # path to val/test images
         dataloader = create_dataloader(path, imgsz, batch_size, gs, opt, pad=0.5, rect=True,
                                        prefix=colorstr('test: ' if opt.task == 'test' else 'val: '))[0]
-
-    if device.type != 'cpu':
-        model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
 
     seen = 0
     confusion_matrix = ConfusionMatrix(nc=nc)
@@ -101,10 +96,10 @@ def test(data,
     coco91class = coco80_to_coco91_class()
     s = ('%20s' + '%12s' * 6) % ('Class', 'Images', 'Targets', 'P', 'R', 'mAP@.5', 'mAP@.5:.95')
     p, r, f1, mp, mr, map50, map, t0, t1 = 0., 0., 0., 0., 0., 0., 0., 0., 0.
-    loss = 0
+    loss = torch.zeros(3, device=device)
     jdict, stats, ap, ap_class, wandb_images = [], [], [], [], []
     for batch_i, (img, targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
-        img = img.to(device)
+        img = img.to(device, non_blocking=True)
         img = img.half() if half else img.float()  # uint8 to fp16/32
         img /= 255.0  # 0 - 255 to 0.0 - 1.0
         targets = targets.to(device)
@@ -113,15 +108,7 @@ def test(data,
         with torch.no_grad():
             # Run model
             t = time_synchronized()
-            with amp.autocast(enabled=cuda):
-                img2 = torch.zeros(32, 3, 320, 672).to(device).type_as(next(model.parameters()))
-                print(img.shape, img.device, img.dtype)
-                print(img2.shape, img2.device, img2.dtype)
-
-                model(img2)
-                model(img)
-
-
+            with torch.cuda.amp.autocast(enabled=cuda):
                 out, train_out = model(img, augment=augment)  # inference and training outputs
             t0 += time_synchronized() - t
 
