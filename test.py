@@ -114,10 +114,9 @@ def test(data,
             # Run model
             t = time_synchronized()
             with amp.autocast(enabled=cuda):
-                print(img.device)
-                model(img)
-                model(img.to(device))
+                print(img.dtype)
                 model(img.to(device).type_as(next(model.parameters())))
+                model(img.to(device))
 
                 out, train_out = model(img, augment=augment)  # inference and training outputs
             t0 += time_synchronized() - t
