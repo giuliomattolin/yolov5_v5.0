@@ -116,7 +116,7 @@ def test(data,
             with amp.autocast(enabled=cuda):
                 print(img.dtype)
                 model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
-                model(img.to(device).type_as(next(model.parameters())))
+                model(img.to(device).float())
 
 
                 out, train_out = model(img, augment=augment)  # inference and training outputs
