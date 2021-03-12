@@ -114,7 +114,7 @@ def test(data,
             # Run model
             t = time_synchronized()
             with amp.autocast(enabled=cuda):
-                img2 = torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters()))
+                img2 = torch.zeros(32, 3, 320, 672).to(device).type_as(next(model.parameters()))
                 print(img.shape, img.device, img.dtype)
                 print(img2.shape, img2.device, img2.dtype)
 
