@@ -189,14 +189,15 @@ def download(url, dir='.', threads=1):
         # Download 1 file
         f = dir / Path(url).name  # filename
         if not f.exists():
+            time.sleep(random.random() * 10)
             print(f'Downloading {url} to {f}...')
             torch.hub.download_url_to_file(url, f, progress=True)  # download
-        if f.suffix in ('.zip', '.gz'):
-            print(f'Unzipping {f}...')
-            if f.suffix == '.zip':
-                os.system(f'unzip -qo {f} -d {dir} && rm {f}')  # unzip -quiet -overwrite
-            elif f.suffix == '.gz':
-                os.system(f'tar xfz {f} --directory {f.parent} && rm {f}')  # unzip
+        # if f.suffix in ('.zip', '.gz'):
+        #     print(f'Unzipping {f}...')
+        #     if f.suffix == '.zip':
+        #         os.system(f'unzip -qo {f} -d {dir} && rm {f}')  # unzip -quiet -overwrite
+        #     elif f.suffix == '.gz':
+        #         os.system(f'tar xfz {f} --directory {f.parent} && rm {f}')  # unzip
 
     dir = Path(dir)
     dir.mkdir(parents=True, exist_ok=True)  # make directory
