@@ -191,7 +191,8 @@ def download(url, dir='.', threads=1):
         if not f.exists():
             # time.sleep(random.random() * 1)
             print(f'Downloading {url} to {f}...')
-            torch.hub.download_url_to_file(url, f, progress=True)  # download
+            # torch.hub.download_url_to_file(url, f, progress=True)  # download
+            os.system(f'curl -retry 9 -C - -L {url} -o {f}')  # curl download, retry and continue on fail
         # if f.suffix in ('.zip', '.gz'):
         #     print(f'Unzipping {f}...')
         #     if f.suffix == '.zip':
