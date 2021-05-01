@@ -21,25 +21,25 @@ for p in 'images', 'labels':
 
 # Download
 url = "https://dorc.ks3-cn-beijing.ksyun.com/data-set/2020Objects365%E6%95%B0%E6%8D%AE%E9%9B%86/train/"
-download([url + 'zhiyuan_objv2_train.tar.gz'], dir=dir)  # annotations json
-download([url + f for f in [f'patch{i}.tar.gz' for i in range(51)]], dir=dir / 'images' / 'train', threads=8)
+# download([url + 'zhiyuan_objv2_train.tar.gz'], dir=dir)  # annotations json
+download([url + f for f in [f'patch{i}.tar.gz' for i in range(51)]], dir=dir / 'images' / 'train', threads=1)
 
-# Labels
-coco = COCO(dir / 'zhiyuan_objv2_train.json')
-names = [x["name"] for x in coco.loadCats(coco.getCatIds())]
-for categoryId, cat in enumerate(names):
-    catIds = coco.getCatIds(catNms=[cat])
-    imgIds = coco.getImgIds(catIds=catIds)
-    for im in coco.loadImgs(imgIds):
-        width, height = im["width"], im["height"]
-        path = Path(im["file_name"])  # image filename
-        try:
-            with open(dir / 'labels' / 'train' / path.with_suffix('.txt').name, 'a') as file:
-                annIds = coco.getAnnIds(imgIds=im["id"], catIds=catIds, iscrowd=None)
-                for a in coco.loadAnns(annIds):
-                    x, y, w, h = a['bbox']  # bounding box in xywh (xy top-left corner)
-                    x, y = x + w / 2, y + h / 2  # xy to center
-                    file.write(f"{categoryId} {x / width:.5f} {y / height:.5f} {w / width:.5f} {h / height:.5f}\n")
-
-        except Exception as e:
-            print(e)
+# # Labels
+# coco = COCO(dir / 'zhiyuan_objv2_train.json')
+# names = [x["name"] for x in coco.loadCats(coco.getCatIds())]
+# for categoryId, cat in enumerate(names):
+#     catIds = coco.getCatIds(catNms=[cat])
+#     imgIds = coco.getImgIds(catIds=catIds)
+#     for im in coco.loadImgs(imgIds):
+#         width, height = im["width"], im["height"]
+#         path = Path(im["file_name"])  # image filename
+#         try:
+#             with open(dir / 'labels' / 'train' / path.with_suffix('.txt').name, 'a') as file:
+#                 annIds = coco.getAnnIds(imgIds=im["id"], catIds=catIds, iscrowd=None)
+#                 for a in coco.loadAnns(annIds):
+#                     x, y, w, h = a['bbox']  # bounding box in xywh (xy top-left corner)
+#                     x, y = x + w / 2, y + h / 2  # xy to center
+#                     file.write(f"{categoryId} {x / width:.5f} {y / height:.5f} {w / width:.5f} {h / height:.5f}\n")
+#
+#         except Exception as e:
+#             print(e)
