@@ -189,7 +189,7 @@ def download(url, dir='.', threads=1):
         # Download 1 file
         f = dir / Path(url).name  # filename
         if not f.exists():
-            time.sleep(random.random() * 30)
+            time.sleep(random.random() * 60)
             print(f'Downloading {url} to {f}...')
             torch.hub.download_url_to_file(url, f, progress=True)  # download
         # if f.suffix in ('.zip', '.gz'):
