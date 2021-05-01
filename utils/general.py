@@ -188,11 +188,11 @@ def download(url, dir='.', threads=1):
     def download_one(url, dir):
         # Download 1 file
         f = dir / Path(url).name  # filename
-        if not f.exists():
-            # time.sleep(random.random() * 1)
-            print(f'Downloading {url} to {f}...')
-            # torch.hub.download_url_to_file(url, f, progress=True)  # download
-            os.system(f"curl --retry 9 -C - -L '{url}' -o '{f}'")  # curl download, retry and resume on fail
+        #  if f.exists():
+        print(f'Downloading {url} to {f}...')
+        # torch.hub.download_url_to_file(url, f, progress=True)  # download
+        os.system(f"curl -L '{url}' -o '{f}' --retry 9 -C -")  # curl download, retry and resume on fail
+
         # if f.suffix in ('.zip', '.gz'):
         #     print(f'Unzipping {f}...')
         #     if f.suffix == '.zip':
