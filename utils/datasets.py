@@ -455,8 +455,116 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 pbar.desc = f'{prefix}Caching images ({gb / 1E9:.1f}GB)'
             pbar.close()
 
+    def parse_label(self, im_file, lb_file, prefix):
+        bf, be, bm, bc = False, False, False, False
+        result = None
+        try:
+            # verify images
+            im = Image.open(im_file)
+            im.verify()  # PIL verify
+            shape = exif_size(im)  # image size
+            segments = []  # instance segments
+            assert (shape[0] > 9) & (shape[1] > 9), f'image size {shape} <10 pixels'
+            assert im.format.lower() in img_formats, f'invalid image format {im.format}'
+            # verify labels
+            if os.path.isfile(lb_file):
+                bf = True  # label found
+                with open(lb_file, 'r') as f:
+                    l = [x.split() for x in f.read().strip().splitlines() if len(x)]
+                    if any([len(x) > 8 for x in l]):  # is segment
+                        classes = np.array([x[0] for x in l], dtype=np.float32)
+                        segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in l]  # (cls, xy1...)
+                        l = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
+                    l = np.array(l, dtype=np.float32)
+                if len(l):
+                    assert l.shape[1] == 5, 'labels require 5 columns each'
+                    assert (l >= 0).all(), 'negative labels'
+                    assert (l[:, 1:] <= 1).all(), 'non-normalized or out of bounds coordinate labels'
+                    assert np.unique(l, axis=0).shape[0] == l.shape[0], 'duplicate labels'
+                else:
+                    be = True  # label empty
+                    l = np.zeros((0, 5), dtype=np.float32)
+            else:
+                bm = True  # label missing
+                l = np.zeros((0, 5), dtype=np.float32)
+            result = [l, shape, segments]
+        except Exception as e:
+            bc = True
+            logging.info(f'{prefix}WARNING: Ignoring corrupted image and/or label {im_file}: {e}')
+        return result, bf, be, bm, bc
+
+
+    def cache_labels_multi(self, path=Path('./labels.cache'), prefix=''):
+        t0 = time.time()
+
+        # Cache dataset labels, check images and read shapes
+        x = {}  # dict
+        nm, nf, ne, nc = 0, 0, 0, 0  # number missing, found, empty, duplicate
+        n = len(self.img_files)
+        desc = f"{prefix}Scanning '{path.parent / path.stem}' images and labels... "
+        import multiprocessing
+
+        # OPTION1
+        results = ThreadPool(8).imap(lambda x: self.parse_label(*x), zip(self.img_files, self.label_files, repeat(prefix)))  # 8 threads
+        pbar = tqdm(results, desc=desc, total=n)
+        for im_file, (label, bf, be, bm, bc) in zip(self.img_files, pbar):
+            nf += int(bf)
+            ne += int(be)
+            nm += int(bm)
+            nc += int(bc)
+            if label is not None:
+                x[im_file] = label
+            pbar.desc = f"{desc}{nf} found, {nm} missing, {ne} empty, {nc} corrupted"
+        pbar.close()
+
+        # OPTION2
+        # pbar = tqdm(zip(self.img_files, self.label_files, repeat(prefix)), desc=desc, total=n)
+        # with multiprocessing.Pool(8) as pool:
+        #     labels = pool.starmap(self.parse_label, pbar)
+        #     for im_file, (label, bf, be, bm, bc) in zip(self.img_files, labels):
+        #         nf += int(bf)
+        #         ne += int(be)
+        #         nm += int(bm)
+        #         nc += int(bc)
+        #         if label is not None:
+        #             x[im_file] = label
+        #         pbar.desc = f"{desc}{nf} found, {nm} missing, {ne} empty, {nc} corrupted"
+        # # logging.info(f"{desc}{nf} found, {nm} missing, {ne} empty, {nc} corrupted")
+        # pbar.close()
+
+        # OPTION3
+        # pbar = tqdm(zip(self.img_files, self.label_files, repeat(prefix)), desc=desc, total=n)
+        # with multiprocessing.Pool(8) as pool:
+        #     labels = pool.starmap(self.parse_label, pbar)
+        #     for im_file, (label, bf, be, bm, bc) in zip(self.img_files, labels):
+        #         nf += int(bf)
+        #         ne += int(be)
+        #         nm += int(bm)
+        #         nc += int(bc)
+        #         if label is not None:
+        #             x[im_file] = label
+        #         pbar.desc = f"{desc}{nf} found, {nm} missing, {ne} empty, {nc} corrupted"
+        # #logging.info(f"{desc}{nf} found, {nm} missing, {ne} empty, {nc} corrupted")
+        # pbar.close()
+
+        if nf == 0:
+            logging.info(f'{prefix}WARNING: No labels found in {path}. See {help_url}')
+
+        x['hash'] = get_hash(self.label_files + self.img_files)
+        x['results'] = nf, nm, ne, nc, len(self.img_files)
+        x['version'] = 0.2  # cache version
+        try:
+            # torch.save(x, path)  # save cache for next time
+            logging.info(f'{prefix}New cache created: {path}')
+        except Exception as e:
+            logging.info(f'{prefix}WARNING: Cache directory {path.parent} is not writeable: {e}')  # path not writeable
+
+        print(f'cache function took {time.time() - t0} seconds')
+        return x
+
     def cache_labels(self, path=Path('./labels.cache'), prefix=''):
         # Cache dataset labels, check images and read shapes
+        t0 = time.time()
         x = {}  # dict
         nm, nf, ne, nc = 0, 0, 0, 0  # number missing, found, empty, duplicate
         pbar = tqdm(zip(self.img_files, self.label_files), desc='Scanning images', total=len(self.img_files))
@@ -504,13 +612,15 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             logging.info(f'{prefix}WARNING: No labels found in {path}. See {help_url}')
 
         x['hash'] = get_hash(self.label_files + self.img_files)
-        x['results'] = nf, nm, ne, nc, i + 1
+        x['results'] = nf, nm, ne, nc, len(self.img_files)
         x['version'] = 0.2  # cache version
         try:
-            torch.save(x, path)  # save cache for next time
+            #torch.save(x, path)  # save cache for next time
             logging.info(f'{prefix}New cache created: {path}')
         except Exception as e:
             logging.info(f'{prefix}WARNING: Cache directory {path.parent} is not writeable: {e}')  # path not writeable
+
+        print(f'cache function took {time.time() - t0} seconds')
         return x
 
     def __len__(self):
