@@ -505,17 +505,17 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         import multiprocessing
 
         # OPTION1
-        results = ThreadPool(8).imap(lambda x: self.parse_label(*x), zip(self.img_files, self.label_files, repeat(prefix)))  # 8 threads
-        pbar = tqdm(results, desc=desc, total=n)
-        for im_file, (label, bf, be, bm, bc) in zip(self.img_files, pbar):
-            nf += int(bf)
-            ne += int(be)
-            nm += int(bm)
-            nc += int(bc)
-            if label is not None:
-                x[im_file] = label
-            pbar.desc = f"{desc}{nf} found, {nm} missing, {ne} empty, {nc} corrupted"
-        pbar.close()
+        # results = ThreadPool(8).imap(lambda x: self.parse_label(*x), zip(self.img_files, self.label_files, repeat(prefix)))  # 8 threads
+        # pbar = tqdm(results, desc=desc, total=n)
+        # for im_file, (label, bf, be, bm, bc) in zip(self.img_files, pbar):
+        #     nf += int(bf)
+        #     ne += int(be)
+        #     nm += int(bm)
+        #     nc += int(bc)
+        #     if label is not None:
+        #         x[im_file] = label
+        #     pbar.desc = f"{desc}{nf} found, {nm} missing, {ne} empty, {nc} corrupted"
+        # pbar.close()
 
         # OPTION2
         # pbar = tqdm(zip(self.img_files, self.label_files, repeat(prefix)), desc=desc, total=n)
@@ -533,19 +533,19 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         # pbar.close()
 
         # OPTION3
-        # pbar = tqdm(zip(self.img_files, self.label_files, repeat(prefix)), desc=desc, total=n)
-        # with multiprocessing.Pool(8) as pool:
-        #     labels = pool.starmap(self.parse_label, pbar)
-        #     for im_file, (label, bf, be, bm, bc) in zip(self.img_files, labels):
-        #         nf += int(bf)
-        #         ne += int(be)
-        #         nm += int(bm)
-        #         nc += int(bc)
-        #         if label is not None:
-        #             x[im_file] = label
-        #         pbar.desc = f"{desc}{nf} found, {nm} missing, {ne} empty, {nc} corrupted"
-        # #logging.info(f"{desc}{nf} found, {nm} missing, {ne} empty, {nc} corrupted")
-        # pbar.close()
+        pbar = tqdm(zip(self.img_files, self.label_files, repeat(prefix)), desc=desc, total=n)
+        with multiprocessing.Pool(8) as pool:
+            labels = pool.starmap(self.parse_label, pbar)
+            for im_file, (label, bf, be, bm, bc) in zip(self.img_files, labels):
+                nf += int(bf)
+                ne += int(be)
+                nm += int(bm)
+                nc += int(bc)
+                if label is not None:
+                    x[im_file] = label
+                pbar.desc = f"{desc}{nf} found, {nm} missing, {ne} empty, {nc} corrupted"
+        #logging.info(f"{desc}{nf} found, {nm} missing, {ne} empty, {nc} corrupted")
+        pbar.close()
 
         if nf == 0:
             logging.info(f'{prefix}WARNING: No labels found in {path}. See {help_url}')
