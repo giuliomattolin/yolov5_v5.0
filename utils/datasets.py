@@ -493,8 +493,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             logging.info(f'{prefix}WARNING: Ignoring corrupted image and/or label {im_file}: {e}')
         return result, bf, be, bm, bc
 
-
-    def cache_labels(self, path=Path('./labels.cache'), prefix=''):
+    def cache_labels_multi(self, path=Path('./labels.cache'), prefix=''):
         t0 = time.time()
 
         # Cache dataset labels, check images and read shapes
@@ -544,7 +543,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 if label is not None:
                     x[im_file] = label
                 pbar.desc = f"{desc}{nf} found, {nm} missing, {ne} empty, {nc} corrupted"
-        #logging.info(f"{desc}{nf} found, {nm} missing, {ne} empty, {nc} corrupted")
+        # logging.info(f"{desc}{nf} found, {nm} missing, {ne} empty, {nc} corrupted")
         pbar.close()
 
         if nf == 0:
@@ -562,7 +561,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         print(f'cache function took {time.time() - t0} seconds')
         return x
 
-    def cache_labels_multi(self, path=Path('./labels.cache'), prefix=''):
+    def cache_labels(self, path=Path('./labels.cache'), prefix=''):
         # Cache dataset labels, check images and read shapes
         t0 = time.time()
         x = {}  # dict
@@ -615,7 +614,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         x['results'] = nf, nm, ne, nc, len(self.img_files)
         x['version'] = 0.2  # cache version
         try:
-            #torch.save(x, path)  # save cache for next time
+            # torch.save(x, path)  # save cache for next time
             logging.info(f'{prefix}New cache created: {path}')
         except Exception as e:
             logging.info(f'{prefix}WARNING: Cache directory {path.parent} is not writeable: {e}')  # path not writeable
