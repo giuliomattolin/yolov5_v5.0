@@ -387,15 +387,18 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             if stopper(epoch=epoch, fitness=fi):
                 break
 
-            # Stop DDP TODO: known issues shttps://github.com/ultralytics/yolov5/pull/4576
-            # stop = stopper(epoch=epoch, fitness=fi)
-            # if RANK == 0:
-            #    dist.broadcast_object_list([stop], 0)  # broadcast 'stop' to all ranks
-
         # Stop DPP
         # with torch_distributed_zero_first(RANK):
         # if stop:
         #    break  # must break all DDP ranks
+
+        # Broadcast if DDP
+        if RANK != -1:
+            stop = (torch.tensor(stop) if RANK == 0 else torch.zeros(1)).bool()
+            dist.broadcast(stop, 0)
+            if RANK != 0:
+                if stop:
+                    break
 
         # end epoch ----------------------------------------------------------------------------------------------------
     # end training -----------------------------------------------------------------------------------------------------
