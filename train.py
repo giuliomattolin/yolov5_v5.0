@@ -394,7 +394,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 
         # Broadcast if DDP
         if RANK != -1:
-            stop = (torch.tensor(stop) if RANK == 0 else torch.zeros(1)).bool()
+            stop = (torch.tensor([stop]).to(device) if RANK == 0 else torch.zeros([1]).to(device)).bool()
             dist.broadcast(stop, 0)
             if RANK != 0:
                 if stop:
