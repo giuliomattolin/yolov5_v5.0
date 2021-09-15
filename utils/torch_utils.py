@@ -118,7 +118,7 @@ def profile(input, ops, n=10, device=None):
     for x in input if isinstance(input, list) else [input]:
         x = x.to(device)
         x.requires_grad = True
-        for m in ops if isinstance(ops, list) else [ops]:
+        for i, m in enumerate(ops if isinstance(ops, list) else [ops]):
             m = m.to(device) if hasattr(m, 'to') else m  # device
             m = m.half() if hasattr(m, 'half') and isinstance(x, torch.Tensor) and x.dtype is torch.float16 else m
             tf, tb, t = 0., 0., [0., 0., 0.]  # dt forward, backward
@@ -128,7 +128,7 @@ def profile(input, ops, n=10, device=None):
                 flops = 0
 
             try:
-                for _ in range(n):
+                for _ in range(n if i else 1):  # run once before profiling
                     t[0] = time_sync()
                     y = m(x)
                     t[1] = time_sync()
@@ -144,12 +144,12 @@ def profile(input, ops, n=10, device=None):
                 s_in = tuple(x.shape) if isinstance(x, torch.Tensor) else 'list'
                 s_out = tuple(y.shape) if isinstance(y, torch.Tensor) else 'list'
                 p = sum(list(x.numel() for x in m.parameters())) if isinstance(m, nn.Module) else 0  # parameters
-                print(f'{p:12}{flops:12.4g}{mem:>14.3f}{tf:14.4g}{tb:14.4g}{str(s_in):>24s}{str(s_out):>24s}')
-                results.append([p, flops, mem, tf, tb, s_in, s_out])
+                if i:
+                    print(f'{p:12}{flops:12.4g}{mem:>14.3f}{tf:14.4g}{tb:14.4g}{str(s_in):>24s}{str(s_out):>24s}')
+                    results.append([p, flops, mem, tf, tb, s_in, s_out])
             except Exception as e:
                 print(e)
                 results.append(None)
-            torch.cuda.empty_cache()
     return results
 
 
