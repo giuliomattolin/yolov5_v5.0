@@ -507,7 +507,7 @@ def main(opt, callbacks=Callbacks()):
     device = select_device(opt.device, batch_size=opt.batch_size)
     if LOCAL_RANK != -1:
         assert torch.cuda.device_count() > LOCAL_RANK, 'insufficient CUDA devices for DDP command'
-        assert opt.batch_size % WORLD_SIZE == 0, '--batch-size must be multiple of CUDA device count'
+        assert opt.batch_size % WORLD_SIZE == 0, f'--batch-size must be multiple of CUDA device count {WORLD_SIZE}'
         assert not opt.image_weights, '--image-weights argument is not compatible with DDP training'
         assert not opt.evolve, '--evolve argument is not compatible with DDP training'
         torch.cuda.set_device(LOCAL_RANK)
