@@ -226,7 +226,7 @@ def check_online():
 def check_git_status():
     # Recommend 'git pull' if code is out of date
     msg = ', for updates see https://github.com/ultralytics/yolov5'
-    print(colorstr('github: '), end='')
+    print(colorstr('GitHub: '), end='')
     assert Path('.git').exists(), 'skipping check (not a git repository)' + msg
     assert not is_docker(), 'skipping check (Docker image)' + msg
     assert check_online(), 'skipping check (offline)' + msg

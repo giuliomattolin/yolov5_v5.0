@@ -356,7 +356,7 @@ def parse_opt():
                         default=['torchscript', 'onnx'],
                         help='available formats are (torchscript, onnx, coreml, saved_model, pb, tflite, tfjs)')
     opt = parser.parse_args()
-    print_args(FILE.stem, opt)
+    print_args(FILE.name, opt)
     return opt
 
 
