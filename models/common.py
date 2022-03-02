@@ -146,6 +146,10 @@ class C3TR(C3):
         self.m = TransformerBlock(c_, c_, 4, n)
 
 
+class C3DETRTR(C3):
+    pass
+
+
 class SPP(nn.Module):
     # Spatial pyramid pooling layer used in YOLOv3-SPP
     def __init__(self, c1, c2, k=(5, 9, 13)):
