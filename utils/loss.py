@@ -214,3 +214,42 @@ class ComputeLoss:
             tcls.append(c)  # class
 
         return tcls, tbox, indices, anch
+
+
+class ComputeDomainLoss:
+    # Compute domain losses
+    def __init__(self, model):
+        h = model.hyp  # hyperparameters
+
+        # Define criteria
+        BCE = nn.BCEWithLogitsLoss()
+        self.BCE, self.hyp = BCE, h 
+
+    def __call__(self, sp, tp):  # source predictions, target predictions
+        device = sp[0].device
+
+        losses = [torch.zeros(1, device=device) for _ in range(len(sp))]
+        accuracies = [torch.zeros(1, device=device) for _ in range(len(sp))]
+        targets = self.build_targets(sp, tp)  # targets
+
+        # Losses and accuracies
+        for i in range(len(sp)):
+            losses[i] += self.BCE(torch.cat((sp[i], tp[i])), targets[i].to(device))
+            accuracies[i] = self.compute_accuracies(torch.cat((sp[i], tp[i])), targets[i].to(device))
+
+        return sum(losses)/3., torch.cat(losses).detach(), torch.cat(accuracies).detach()
+
+    def build_targets(self, sp, tp):
+        # Build targets for compute_domain_loss()
+        t = []
+        for i in range(len(sp)):
+            t.append(torch.cat((torch.zeros(sp[i].shape), torch.ones(tp[i].shape))))
+        return t
+
+    def compute_accuracies(self, scores, ground_truth):
+        # Compute accuracies for compute_domain_loss()
+        predictions = (scores > 0.) # if > 0 it predicted source
+        num_correct = (predictions == ground_truth).sum()
+        num_samples = torch.prod(torch.tensor(predictions.shape))
+        accuracy = float(num_correct)/float(num_samples)*100
+        return torch.tensor([accuracy]).to(scores.device)

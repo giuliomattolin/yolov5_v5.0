@@ -1,7 +1,7 @@
 # YOLOv5 common modules
 
 import math
-from copy import copy
+from copy import copy, deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +11,8 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from torch.cuda import amp
+import torch.nn.functional as F
+from torch.autograd import Function
 
 from utils.datasets import letterbox
 from utils.general import non_max_suppression, make_divisible, scale_coords, increment_path, xyxy2xywh
@@ -91,6 +93,220 @@ class TransformerBlock(nn.Module):
         return x
 
 
+class Transformer(nn.Module):
+    # Transformer layer https://arxiv.org/abs/2010.11929 (LayerNorm layers removed for better performance)
+    def __init__(
+        self, 
+        num_channels, 
+        d_model, 
+        num_heads, 
+        num_layers, 
+        dim_feedforward=2048,
+        dropout=0.1,
+        activation="relu"
+        ):
+        super().__init__()
+        self.conv = None
+        if num_channels != d_model:
+            self.conv = Conv(num_channels, d_model, 1, 1)  # NxCxHxW to NxDxHxW
+        self.pos_embed = nn.Linear(d_model, d_model)  # learnable position embedding
+        encoder_layer = TransformerEncoderLayer(
+            d_model, num_heads, dim_feedforward, dropout, activation
+        )
+        self.encoder = TransformerEncoder(
+            encoder_layer, num_layers
+        )
+
+        self._reset_parameters()
+
+        self.d_model = d_model
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def forward(self, src):  # F_{s} NxDxHxW
+        bs, c, h, w = src.shape
+        if self.conv is not None:
+            src = self.conv(src)
+        # flatten NxDxHxW to HWxNxD
+        src = src.flatten(2).permute(2, 0, 1)
+        src = src + self.pos_embed(src)
+
+        memory, attn_output_weights = self.encoder(src)  # G'_s, A'_s
+        # 1. take the maximum of A'_s in the second dimension
+        max_values, inds = torch.max(attn_output_weights, 2)
+        # 2. reshape the resulting vector to H_s x W_s
+        obj_map = torch.reshape(max_values, (bs, h, w))
+        # 3. min-max normalize the resulting matrix to the [0, 1] range
+        obj_map_min = torch.min(obj_map)
+        obj_map_max = torch.max(obj_map)
+        obj_map = (obj_map - obj_map_min) / (obj_map_max - obj_map_min)
+        obj_map = torch.nan_to_num(obj_map)
+        return memory.permute(1, 2, 0).view(bs, c, h, w), obj_map  # G_s, A_s
+
+
+class TransformerEncoder(nn.Module):
+    def __init__(self, encoder_layer, num_layers):
+        super().__init__()
+        self.layers = _get_clones(encoder_layer, num_layers)
+        self.num_layers = num_layers
+
+    def forward(self, src, mask=None, src_key_padding_mask=None):
+        output = src
+
+        for layer in self.layers:
+            output, attn_output_weights = layer(
+                output,
+                src_mask=mask,
+                src_key_padding_mask=src_key_padding_mask
+            )
+
+        return output, attn_output_weights
+
+
+def _get_clones(module, N):
+    return nn.ModuleList([deepcopy(module) for i in range(N)])
+
+
+def _get_activation_fn(activation):
+    """Return an activation function given a string"""
+    if activation == "relu":
+        return F.relu
+    if activation == "gelu":
+        return F.gelu
+    if activation == "glu":
+        return F.glu
+    raise RuntimeError(f"activation should be relu/gelu, not {activation}.")
+
+
+class TransformerEncoderLayer(nn.Module):
+    def __init__(
+        self,
+        d_model,
+        nhead,
+        dim_feedforward=2048,
+        dropout=0.1,
+        activation="relu",
+    ):
+        super().__init__()
+        # self.q = nn.Conv2d(c, d_model, kernel_size=1)
+        self.q = nn.Linear(d_model, d_model, bias=False)
+        self.k = nn.Linear(d_model, d_model, bias=False)
+        self.v = nn.Linear(d_model, d_model, bias=False)
+
+        self.self_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, dropout=dropout)
+        # Implementation of Feedforward model
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+        self.activation = _get_activation_fn(activation)
+
+    def forward(
+        self,
+        src,  # embedding H_sW_sxD
+        src_mask=None,
+        src_key_padding_mask=None,
+    ):
+        # q H_sW_sxD
+        # k H_sW_sxD
+        # v H_sW_sxD
+        q = self.q(src)  # encoder input
+        k = self.k(src)  # encoder input
+        v = self.v(src)  # encoder input
+        # G'_s, A'_s
+        attn_output, attn_output_weights = self.self_attn(
+            q, k, value=v, attn_mask=src_mask, key_padding_mask=src_key_padding_mask
+        )
+
+        src = src + self.dropout1(attn_output)
+        # X~q
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src), inplace=False)))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+        return src, attn_output_weights
+
+
+class DiscriminatorConv(nn.Module):
+    def __init__(self, c1, num_convs=2, lambda_=0.1):
+        super().__init__()
+        self.rev = GradientReversal(lambda_=lambda_)
+
+        dis_tower = []
+        for _ in range(num_convs):
+            dis_tower.append(
+                nn.Conv2d(
+                    c1,
+                    c1,
+                    kernel_size=3,
+                    stride=1,
+                    padding=1
+                )
+            )
+            dis_tower.append(nn.GroupNorm(32, c1))
+            dis_tower.append(nn.ReLU())
+
+        self.add_module('dis_tower', nn.Sequential(*dis_tower))
+
+        self.cls_logits = nn.Conv2d(
+            c1, 1, kernel_size=3, stride=1,
+            padding=1
+        )
+
+        # initialization
+        for modules in [self.dis_tower, self.cls_logits]:
+            for l in modules.modules():
+                if isinstance(l, nn.Conv2d):
+                    torch.nn.init.normal_(l.weight, std=0.01)
+                    torch.nn.init.constant_(l.bias, 0)
+    
+    def forward(self, x, epoch):
+        if epoch > 2:
+            x = self.rev(x)
+        
+        x = self.dis_tower(x)
+        x = self.cls_logits(x)
+        return x
+
+
+class GradientReversal(torch.nn.Module):
+    def __init__(self, lambda_=1):
+        super(GradientReversal, self).__init__()
+        self.lambda_ = lambda_
+
+    def forward(self, x):
+        return GradientReversalFunction.apply(x, self.lambda_)
+
+
+class GradientReversalFunction(Function):
+    """
+    Gradient Reversal Layer from:
+    Unsupervised Domain Adaptation by Backpropagation (Ganin & Lempitsky, 2015)
+    Forward pass is the identity function. In the backward pass,
+    the upstream gradients are multiplied by -lambda (i.e. gradient is reversed)
+    """
+
+    @staticmethod
+    def forward(ctx, x, lambda_):
+        ctx.lambda_ = lambda_
+        return x.clone()
+
+    @staticmethod
+    def backward(ctx, grads):
+        lambda_ = ctx.lambda_
+        lambda_ = grads.new_tensor(lambda_)
+        dx = -lambda_ * grads
+        return dx, None
+
+
 class Bottleneck(nn.Module):
     # Standard bottleneck
     def __init__(self, c1, c2, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, shortcut, groups, expansion
@@ -138,12 +354,29 @@ class C3(nn.Module):
         return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1))
 
 
-class C3TR(C3):
-    # C3 module with TransformerBlock()
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
-        super().__init__(c1, c2, n, shortcut, g, e)
-        c_ = int(c2 * e)
-        self.m = TransformerBlock(c_, c_, 4, n)
+# class C3TR(C3):
+#     # C3 module with TransformerBlock()
+#     def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+#         super().__init__(c1, c2, n, shortcut, g, e)
+#         c_ = int(c2 * e)
+#         self.m = TransformerBlock(c_, c_, 4, n)
+
+
+class C3TR(nn.Module):
+    # C3 module with Transformer()
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, num_heads=1, num_layers=1):
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.cv3 = Conv(2 * c_, c2, 1)  # act=FReLU(c2)
+        self.m1 = nn.Sequential(*[Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)])
+        self.m2 = Transformer(c2, c2, num_heads, num_layers)
+        
+    def forward(self, x):
+        x = self.cv3(torch.cat((self.m1(self.cv1(x)), self.cv2(x)), dim=1))
+        feat_map, obj_map = self.m2(x)
+        return x + feat_map, obj_map
 
 
 class SPP(nn.Module):

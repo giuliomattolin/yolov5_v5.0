@@ -4,11 +4,17 @@ import argparse
 import logging
 import sys
 from copy import deepcopy
+from pathlib import Path
 
 sys.path.append('./')  # to run '$ python *.py' files in subdirectories
 logger = logging.getLogger(__name__)
 
-from models.common import *
+adv = True if 'adv' in Path(sys.argv[0]).stem else False
+
+if adv:
+    from models.advcommon import *
+else:
+    from models.common import *
 from models.experimental import *
 from utils.autoanchor import check_anchor_order
 from utils.general import make_divisible, check_file, set_logging
@@ -90,7 +96,7 @@ class Model(nn.Module):
         m = self.model[-1]  # Detect()
         if isinstance(m, Detect):
             s = 256  # 2x min stride
-            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
+            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s), validation=True)])  # forward
             m.anchors /= m.stride.view(-1, 1, 1)
             check_anchor_order(m)
             self.stride = m.stride
@@ -102,7 +108,7 @@ class Model(nn.Module):
         self.info()
         logger.info('')
 
-    def forward(self, x, augment=False, profile=False):
+    def forward(self, x, augment=False, profile=False, gamma=0., validation=False, epoch=3):
         if augment:
             img_size = x.shape[-2:]  # height, width
             s = [1, 0.83, 0.67]  # scales
@@ -120,10 +126,10 @@ class Model(nn.Module):
                 y.append(yi)
             return torch.cat(y, 1), None  # augmented inference, train
         else:
-            return self.forward_once(x, profile)  # single-scale inference, train
+            return self.forward_once(x, profile, gamma=gamma, validation=validation, epoch=epoch)  # single-scale inference, train
 
-    def forward_once(self, x, profile=False):
-        y, dt = [], []  # outputs
+    def forward_once(self, x, profile=False, gamma=0., validation=False, epoch=3):
+        y, dt, dis_out  = [], [], []  # outputs
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
@@ -136,12 +142,26 @@ class Model(nn.Module):
                 dt.append((time_synchronized() - t) * 100)
                 print('%10.1f%10.0f%10.1fms %-40s' % (o, m.np, dt[-1], m.type))
 
-            x = m(x)  # run
+            if m.__class__.__name__ in ['DiscriminatorConv']:
+                if not validation:
+                    num_channels = torch.tensor(x.shape[1])
+                    # NxHxW to Nx1xHxW
+                    obj_map = torch.unsqueeze(obj_map, 1)
+                    if obj_map.get_device() != -1:
+                        num_channels = num_channels.to(obj_map.get_device()) 
+                    # Nx1xHxW to Nx3xHxW
+                    obj_map = torch.repeat_interleave(obj_map, num_channels, dim=1)
+                    weigh_feat_map = (1-gamma)*x + gamma*x*obj_map
+                    dis_out.append(m(weigh_feat_map, epoch))
+            elif m.__class__.__name__ in ['C3TR', 'C3DETRTR', 'C3SwinTR', 'C3STR']:
+                x, obj_map = m(x)  # run
+            else:
+                x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
 
         if profile:
             print('%.1fms total' % sum(dt))
-        return x
+        return x if not dis_out else (x, dis_out)
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
         # https://arxiv.org/abs/1708.02002 section 3.3
@@ -236,6 +256,8 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             c2 = ch[f] * args[0] ** 2
         elif m is Expand:
             c2 = ch[f] // args[0] ** 2
+        elif adv and m is DiscriminatorConv:
+            args.insert(0, ch[f])
         else:
             c2 = ch[f]
 

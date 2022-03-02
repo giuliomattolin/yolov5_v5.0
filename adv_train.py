@@ -21,16 +21,16 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-import test  # import test.py to get mAP after each epoch
+import adv_test  # import test.py to get mAP after each epoch
 from models.experimental import attempt_load
 from models.yolo import Model
 from utils.autoanchor import check_anchors
-from utils.datasets import create_dataloader
+from utils.advdatasets import create_dataloader, create_adv_dataloaders
 from utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
     fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
     check_requirements, print_mutation, set_logging, one_cycle, colorstr
 from utils.google_utils import attempt_download
-from utils.loss import ComputeLoss
+from utils.loss import ComputeLoss, ComputeDomainLoss
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
@@ -40,8 +40,8 @@ logger = logging.getLogger(__name__)
 
 def train(hyp, opt, device, tb_writer=None):
     logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
-    save_dir, epochs, batch_size, total_batch_size, weights, rank = \
-        Path(opt.save_dir), opt.epochs, opt.batch_size, opt.total_batch_size, opt.weights, opt.global_rank
+    save_dir, epochs, batch_size, total_batch_size, weights, rank, delta = \
+        Path(opt.save_dir), opt.epochs, opt.batch_size, opt.total_batch_size, opt.weights, opt.global_rank, opt.delta
 
     # Directories
     wdir = save_dir / 'weights'
@@ -97,6 +97,7 @@ def train(hyp, opt, device, tb_writer=None):
         check_dataset(data_dict)  # check
     train_path = data_dict['train']
     test_path = data_dict['val']
+    adv_path = data_dict['adv']
 
     # Freeze
     freeze = []  # parameter names to freeze (full or partial)
@@ -186,12 +187,27 @@ def train(hyp, opt, device, tb_writer=None):
         logger.info('Using SyncBatchNorm()')
 
     # Trainloader
-    dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
-                                            hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
-                                            world_size=opt.world_size, workers=opt.workers,
-                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
-    mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
-    nb = len(dataloader)  # number of batches
+    print("Domain-Adversarial training")
+    (train_loader_s, dataset_s, train_loader_t, dataset_t) = create_adv_dataloaders(
+        train_path,
+        adv_path,
+        imgsz,
+        batch_size // opt.world_size,
+        gs,
+        opt.single_cls,
+        hyp=hyp,
+        augment=True,
+        cache=opt.cache_images,
+        rect=opt.rect,
+        rank=rank,
+        world_size=opt.world_size,
+        workers=opt.workers,
+        image_weights=opt.image_weights,
+        quad=opt.quad,
+        prefix=colorstr("train: "),
+    )
+    mlc = np.concatenate(dataset_s.labels, 0)[:, 0].max()  # max label class
+    nb = min(len(train_loader_s), len(train_loader_t))  # number of batches
     assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
 
     # Process 0
@@ -202,7 +218,7 @@ def train(hyp, opt, device, tb_writer=None):
                                        pad=0.5, prefix=colorstr('val: '))[0]
 
         if not opt.resume:
-            labels = np.concatenate(dataset.labels, 0)
+            labels = np.concatenate(dataset_s.labels, 0)
             c = torch.tensor(labels[:, 0])  # classes
             # cf = torch.bincount(c.long(), minlength=nc) + 1.  # frequency
             # model._initialize_biases(cf.to(device))
@@ -213,7 +229,7 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Anchors
             if not opt.noautoanchor:
-                check_anchors(dataset, model=model, thr=hyp['anchor_t'], imgsz=imgsz)
+                check_anchors(dataset_s, model=model, thr=hyp['anchor_t'], imgsz=imgsz)
             model.half().float()  # pre-reduce anchor precision
 
     # DDP mode
@@ -230,7 +246,7 @@ def train(hyp, opt, device, tb_writer=None):
     model.nc = nc  # attach number of classes to model
     model.hyp = hyp  # attach hyperparameters to model
     model.gr = 1.0  # iou loss ratio (obj_loss = 1.0 or iou)
-    model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc  # attach class weights
+    model.class_weights = labels_to_class_weights(dataset_s.labels, nc).to(device) * nc  # attach class weights
     model.names = names
 
     # Start training
@@ -242,10 +258,12 @@ def train(hyp, opt, device, tb_writer=None):
     scheduler.last_epoch = start_epoch - 1  # do not move
     scaler = amp.GradScaler(enabled=cuda)
     compute_loss = ComputeLoss(model)  # init loss class
+    compute_domain_loss = ComputeDomainLoss(model) # init domain loss class
     logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
-                f'Using {dataloader.num_workers} dataloader workers\n'
+                f'Using {train_loader_s.num_workers + + train_loader_t.num_workers} dataloader workers\n'
                 f'Logging results to {save_dir}\n'
                 f'Starting training for {epochs} epochs...')
+    max_iterations = nb * (epochs - start_epoch)
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         model.train()
 
@@ -254,29 +272,33 @@ def train(hyp, opt, device, tb_writer=None):
             # Generate indices
             if rank in [-1, 0]:
                 cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # class weights
-                iw = labels_to_image_weights(dataset.labels, nc=nc, class_weights=cw)  # image weights
-                dataset.indices = random.choices(range(dataset.n), weights=iw, k=dataset.n)  # rand weighted idx
+                iw = labels_to_image_weights(dataset_s.labels, nc=nc, class_weights=cw)  # image weights
+                dataset_s.indices = random.choices(range(dataset_s.n), weights=iw, k=dataset_s.n)  # rand weighted idx
             # Broadcast if DDP
             if rank != -1:
-                indices = (torch.tensor(dataset.indices) if rank == 0 else torch.zeros(dataset.n)).int()
+                indices = (torch.tensor(dataset_s.indices) if rank == 0 else torch.zeros(dataset_s.n)).int()
                 dist.broadcast(indices, 0)
                 if rank != 0:
-                    dataset.indices = indices.cpu().numpy()
+                    dataset_s.indices = indices.cpu().numpy()
 
         # Update mosaic border
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
         mloss = torch.zeros(4, device=device)  # mean losses
+        madvloss = torch.zeros(3, device=device)  # mean adversarial losses
+        madvaccuracy = torch.zeros(3, device=device)  # mean adversarial accuracies
         if rank != -1:
-            dataloader.sampler.set_epoch(epoch)
-        pbar = enumerate(dataloader)
-        logger.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'labels', 'img_size'))
+            train_loader_s.sampler.set_epoch(epoch)
+            train_loader_t.sampler.set_epoch(epoch)
+        pbar = enumerate(zip(train_loader_s, train_loader_t))
+        logger.info(('\n' + '%10s' * 14) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', "l_small", "l_medium", "l_large", "a_small", "a_medium", "a_large", 'labels', 'img_size'))
         if rank in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
-        for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+        for i, ((imgs_s, targets_s, paths_s, _), (imgs_t, _, paths_t, _)) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
+            imgs = torch.cat([imgs_s, imgs_t])
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
 
             # Warmup
@@ -300,15 +322,29 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Forward
             with amp.autocast(enabled=cuda):
-                pred = model(imgs)  # forward
-                loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                r = ni / max_iterations
+                gamma = 2 / (1 + math.exp(-delta * r)) - 1
+                pred_s, domain_pred_s = model(
+                    imgs[: batch_size // 2 // opt.world_size], gamma=gamma, epoch=epoch
+                )  # forward
+                pred_t, domain_pred_t = model(
+                    imgs[batch_size // 2 // opt.world_size :], gamma=gamma, epoch=epoch
+                )  # forward
+                loss, loss_items = compute_loss(
+                    pred_s, targets_s.to(device)
+                )  # loss scaled by batch_size
+                
+                domain_loss, domain_loss_items, domain_accuracy_items = compute_domain_loss(
+                    domain_pred_s, domain_pred_t
+                )
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
                     loss *= 4.
+            total_loss = loss + domain_loss
 
             # Backward
-            scaler.scale(loss).backward()
+            scaler.scale(total_loss).backward()
 
             # Optimize
             if ni % accumulate == 0:
@@ -321,15 +357,17 @@ def train(hyp, opt, device, tb_writer=None):
             # Print
             if rank in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                madvloss = (madvloss * i + domain_loss_items) / (i + 1)  # update mean losses
+                madvaccuracy = (madvaccuracy * i + domain_accuracy_items) / (i + 1)  # update mean accuracies
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-                s = ('%10s' * 2 + '%10.4g' * 6) % (
-                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1])
+                s = ('%10s' * 2 + '%10.4g' * 12) % (
+                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, *madvloss, *madvaccuracy, targets_s.shape[0], imgs.shape[-1])
                 pbar.set_description(s)
 
                 # Plot
                 if plots and ni < 3:
                     f = save_dir / f'train_batch{ni}.jpg'  # filename
-                    Thread(target=plot_images, args=(imgs, targets, paths, f), daemon=True).start()
+                    Thread(target=plot_images, args=(imgs_s, targets_s, paths_s, f), daemon=True).start()
                     # if tb_writer:
                     #     tb_writer.add_image(f, result, dataformats='HWC', global_step=epoch)
                     #     tb_writer.add_graph(torch.jit.trace(model, imgs, strict=False), [])  # add model graph
@@ -351,7 +389,7 @@ def train(hyp, opt, device, tb_writer=None):
             final_epoch = epoch + 1 == epochs
             if not opt.notest or final_epoch:  # Calculate mAP
                 wandb_logger.current_epoch = epoch + 1
-                results, maps, times = test.test(data_dict,
+                results, maps, times = adv_test.test(data_dict,
                                                  batch_size=batch_size * 2,
                                                  imgsz=imgsz_test,
                                                  model=ema.ema,
@@ -372,10 +410,12 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Log
             tags = ['train/box_loss', 'train/obj_loss', 'train/cls_loss',  # train loss
+                    'train_adv/domain_loss_small', 'train_adv/domain_loss_medium', 'train_adv/domain_loss_large',  # adversarial train loss
+                    'train_adv/domain_accuracy_small', 'train_adv/domain_accuracy_medium', 'train_adv/domain_accuracy_large',  # adversarial train accuracy
                     'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
                     'val/box_loss', 'val/obj_loss', 'val/cls_loss',  # val loss
                     'x/lr0', 'x/lr1', 'x/lr2']  # params
-            for x, tag in zip(list(mloss[:-1]) + list(results) + lr, tags):
+            for x, tag in zip(list(mloss[:-1]) + list(madvloss) + list(madvaccuracy) + list(results) + lr, tags):
                 if tb_writer:
                     tb_writer.add_scalar(tag, x, epoch)  # tensorboard
                 if wandb_logger.wandb:
@@ -422,7 +462,7 @@ def train(hyp, opt, device, tb_writer=None):
         logger.info('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
         if opt.data.endswith('coco.yaml') and nc == 80:  # if COCO
             for m in (last, best) if best.exists() else (last):  # speed, mAP tests
-                results, _, _ = test.test(opt.data,
+                results, _, _ = adv_test.test(opt.data,
                                           batch_size=batch_size * 2,
                                           imgsz=imgsz_test,
                                           conf_thres=0.001,
@@ -489,6 +529,7 @@ if __name__ == '__main__':
     parser.add_argument('--bbox_interval', type=int, default=-1, help='Set bounding-box image logging interval for W&B')
     parser.add_argument('--save_period', type=int, default=-1, help='Log model after every "save_period" epoch')
     parser.add_argument('--artifact_alias', type=str, default="latest", help='version of dataset artifact to be used')
+    parser.add_argument('--delta', type=float, default=5.0, help='Smoothness of the domain adaptation change')
     opt = parser.parse_args()
 
     # Set DDP variables
