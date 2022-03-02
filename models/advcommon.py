@@ -235,6 +235,192 @@ class TransformerEncoderLayer(nn.Module):
         return src, attn_output_weights
 
 
+class DETRTransformer(nn.Module):
+    # Transformer layer https://arxiv.org/abs/2010.11929 (LayerNorm layers removed for better performance)
+    def __init__(
+        self, 
+        num_channels, 
+        d_model, 
+        num_heads, 
+        num_layers, 
+        dim_feedforward=2048,
+        dropout=0.1,
+        activation="relu", 
+        normalize_before=False
+        ):
+        super().__init__()
+        self.input_proj = nn.Conv2d(num_channels, d_model, kernel_size=1)  # embedding 
+        N_steps = d_model // 2
+        self.pos_embed = PositionEmbeddingLearned(N_steps)
+        encoder_layer = DETRTransformerEncoderLayer(
+            d_model, num_heads, dim_feedforward, dropout, activation, normalize_before
+        )
+        encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
+        self.encoder = DETRTransformerEncoder(
+            encoder_layer, num_layers, encoder_norm
+        )
+
+        self._reset_parameters()
+
+        self.d_model = d_model
+        self.nhead = num_heads
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def forward(self, src, mask=None):  # F_{s} NxDxHxW
+        src = self.input_proj(src)
+        # flatten NxDxHxW to HWxNxD
+        bs, c, h, w = src.shape
+        pos_embed = self.pos_embed(src).flatten(2).permute(2, 0, 1)
+        src = src.flatten(2).permute(2, 0, 1)
+        if mask is not None:
+            mask = mask.flatten(1)
+
+        memory, attn_output_weights = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)  # G'_s, A'_s
+        # 1. take the maximum of A'_s in the second dimension
+        max_values, inds = torch.max(attn_output_weights, 2)
+        # 2. reshape the resulting vector to H_s x W_s
+        obj_map = torch.reshape(max_values, (bs, h, w))
+        # 3. min-max normalize the resulting matrix to the [0, 1] range
+        obj_map_min = torch.min(obj_map)
+        obj_map_max = torch.max(obj_map)
+        obj_map = (obj_map - obj_map_min) / (obj_map_max - obj_map_min)
+        obj_map = torch.nan_to_num(obj_map)
+        return memory.permute(1, 2, 0).view(bs, c, h, w), obj_map  # G_s, A_s
+
+
+class DETRTransformerEncoder(nn.Module):
+    def __init__(self, encoder_layer, num_layers, norm=None):
+        super().__init__()
+        self.layers = _get_clones(encoder_layer, num_layers)
+        self.num_layers = num_layers
+        self.norm = norm
+
+    def forward(self, src, mask=None, src_key_padding_mask=None, pos=None):
+        output = src
+
+        for layer in self.layers:
+            output, attn_output_weights = layer(
+                output,
+                src_mask=mask,
+                src_key_padding_mask=src_key_padding_mask,
+                pos=pos
+            )
+
+        if self.norm is not None:
+            output = self.norm(output)
+
+        return output, attn_output_weights
+
+
+class DETRTransformerEncoderLayer(nn.Module):
+    def __init__(
+        self,
+        d_model,
+        nhead,
+        dim_feedforward=2048,
+        dropout=0.1,
+        activation="relu",
+        normalize_before=False
+    ):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, dropout=dropout)
+        # Implementation of Feedforward model
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+        self.activation = _get_activation_fn(activation)
+        self.normalize_before = normalize_before
+
+    def with_pos_embed(self, tensor, pos=None):
+        return tensor if pos is None else tensor + pos
+
+    def forward_post(
+        self,
+        src,  # embedding H_sW_sxD
+        src_mask=None,
+        src_key_padding_mask=None,
+        pos=None
+    ):
+        # q H_sW_sxD
+        # k H_sW_sxD
+        # v H_sW_sxC_s
+        q = k = self.with_pos_embed(src, pos)  # encoder input
+        # G'_s, A'_s
+        attn_output, attn_output_weights = self.self_attn(
+            q, k, value=src, attn_mask=src_mask, key_padding_mask=src_key_padding_mask
+        )
+        src = src + self.dropout1(attn_output)
+        # X~q
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src), inplace=False)))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+        return src, attn_output_weights
+
+    def forward_pre(
+        self,
+        src,  # embedding H_sW_sxD
+        src_mask=None,
+        src_key_padding_mask=None,
+        pos=None
+    ):
+        src2 = self.norm1(src)
+        q = k = self.with_pos_embed(src2, pos)
+        src2 = self.self_attn(q, k, value=src2, attn_mask=src_mask,
+                              key_padding_mask=src_key_padding_mask)[0]
+        src = src + self.dropout1(src2)
+        src2 = self.norm2(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src2), inplace=False)))
+        src = src + self.dropout2(src2)
+        return src
+
+    def forward(self, src,
+                src_mask=None,
+                src_key_padding_mask=None,
+                pos=None):
+        if self.normalize_before:
+            return self.forward_pre(src, src_mask, src_key_padding_mask, pos)
+        return self.forward_post(src, src_mask, src_key_padding_mask, pos)
+
+
+class PositionEmbeddingLearned(nn.Module):
+    """
+    Absolute pos embedding, learned.
+    """
+    def __init__(self, num_pos_feats=256):
+        super().__init__()
+        self.row_embed = nn.Embedding(80, num_pos_feats)
+        self.col_embed = nn.Embedding(80, num_pos_feats)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.uniform_(self.row_embed.weight)
+        nn.init.uniform_(self.col_embed.weight)
+
+    def forward(self, tensors):
+        x = tensors
+        h, w = x.shape[-2:]
+        i = torch.arange(w, device=x.device)
+        j = torch.arange(h, device=x.device)
+        x_emb = self.col_embed(i)
+        y_emb = self.row_embed(j)
+        pos = torch.cat([
+            x_emb.unsqueeze(0).repeat(h, 1, 1),
+            y_emb.unsqueeze(1).repeat(1, w, 1),
+        ], dim=-1).permute(2, 0, 1).unsqueeze(0).repeat(x.shape[0], 1, 1, 1)
+        return pos
+
+
 class DiscriminatorConv(nn.Module):
     def __init__(self, c1, num_convs=2, lambda_=0.1):
         super().__init__()
@@ -372,6 +558,23 @@ class C3TR(nn.Module):
         self.cv3 = Conv(2 * c_, c2, 1)  # act=FReLU(c2)
         self.m1 = nn.Sequential(*[Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)])
         self.m2 = Transformer(c2, c2, num_heads, num_layers)
+        
+    def forward(self, x):
+        x = self.cv3(torch.cat((self.m1(self.cv1(x)), self.cv2(x)), dim=1))
+        feat_map, obj_map = self.m2(x)
+        return x + feat_map, obj_map
+
+
+class C3DETRTR(nn.Module):
+    # C3 module with DETRTransformer()
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, num_heads=1, num_layers=1):
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.cv3 = Conv(2 * c_, c2, 1)  # act=FReLU(c2)
+        self.m1 = nn.Sequential(*[Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)])
+        self.m2 = DETRTransformer(c2, c2, num_heads, num_layers)
         
     def forward(self, x):
         x = self.cv3(torch.cat((self.m1(self.cv1(x)), self.cv2(x)), dim=1))
