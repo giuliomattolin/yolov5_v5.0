@@ -325,10 +325,10 @@ def train(hyp, opt, device, tb_writer=None):
                 r = ni / max_iterations
                 gamma = 2 / (1 + math.exp(-delta * r)) - 1
                 pred_s, domain_pred_s = model(
-                    imgs[: batch_size // 2 // opt.world_size], gamma=gamma, epoch=epoch
+                    imgs[: imgs_s.shape[0] //  opt.world_size], gamma=gamma, epoch=epoch
                 )  # forward
                 pred_t, domain_pred_t = model(
-                    imgs[batch_size // 2 // opt.world_size :], gamma=gamma, epoch=epoch
+                    imgs[imgs_s.shape[0] // opt.world_size :], gamma=gamma, epoch=epoch
                 )  # forward
                 loss, loss_items = compute_loss(
                     pred_s, targets_s.to(device)
