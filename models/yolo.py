@@ -108,7 +108,7 @@ class Model(nn.Module):
         self.info()
         logger.info('')
 
-    def forward(self, x, augment=False, profile=False, gamma=0., validation=False, epoch=3):
+    def forward(self, x, augment=False, profile=False, gamma=0., validation=False):
         if augment:
             img_size = x.shape[-2:]  # height, width
             s = [1, 0.83, 0.67]  # scales
@@ -126,9 +126,9 @@ class Model(nn.Module):
                 y.append(yi)
             return torch.cat(y, 1), None  # augmented inference, train
         else:
-            return self.forward_once(x, profile, gamma=gamma, validation=validation, epoch=epoch)  # single-scale inference, train
+            return self.forward_once(x, profile, gamma=gamma, validation=validation)  # single-scale inference, train
 
-    def forward_once(self, x, profile=False, gamma=0., validation=False, epoch=3):
+    def forward_once(self, x, profile=False, gamma=0., validation=False):
         y, dt, dis_out, obj_maps = [], [], [], []  # outputs
         for m in self.model:
             if m.f != -1:  # if not from previous layer
@@ -152,7 +152,7 @@ class Model(nn.Module):
                     # Nx1xHxW to Nx3xHxW
                     obj_map = torch.repeat_interleave(obj_map, num_channels, dim=1)
                     weigh_feat_map = (1-gamma)*x + gamma*x*obj_map
-                    dis_out.append(m(weigh_feat_map, epoch))
+                    dis_out.append(m(weigh_feat_map))
             elif m.__class__.__name__ in ['C3TR', 'C3DETRTR', 'CBAM']:
                 x, obj_map = m(x)  # run
                 obj_maps.append(obj_map)
