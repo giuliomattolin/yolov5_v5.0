@@ -13,6 +13,7 @@ from PIL import Image
 from torch.cuda import amp
 import torch.nn.functional as F
 from torch.autograd import Function
+import matplotlib.pyplot as plt
 
 from utils.datasets import letterbox
 from utils.general import non_max_suppression, make_divisible, scale_coords, increment_path, xyxy2xywh
@@ -281,7 +282,7 @@ class DETRTransformer(nn.Module):
 
         memory, attn_output_weights = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)  # G'_s, A'_s
         # 1. take the maximum of A'_s in the second dimension
-        max_values, inds = torch.max(attn_output_weights, 2)
+        max_values, _ = torch.max(attn_output_weights, 2)
         # 2. reshape the resulting vector to H_s x W_s
         obj_map = torch.reshape(max_values, (bs, h, w))
         # 3. min-max normalize the resulting matrix to the [0, 1] range
@@ -289,6 +290,8 @@ class DETRTransformer(nn.Module):
         obj_map_max = torch.max(obj_map)
         obj_map = (obj_map - obj_map_min) / (obj_map_max - obj_map_min)
         obj_map = torch.nan_to_num(obj_map)
+        # plt.imshow(obj_map[0].to(float).cpu(), cmap='cividis')
+        # plt.savefig('attn_map.png')
         return memory.permute(1, 2, 0).view(bs, c, h, w), obj_map  # G_s, A_s
 
 
@@ -820,3 +823,49 @@ class Classify(nn.Module):
     def forward(self, x):
         z = torch.cat([self.aap(y) for y in (x if isinstance(x, list) else [x])], 1)  # cat if list
         return self.flat(self.conv(z))  # flatten to x(b,c2)
+
+
+class ChannelAttentionModule(nn.Module):
+    def __init__(self, c1, reduction=16):
+        super(ChannelAttentionModule, self).__init__()
+        mid_channel = c1 // reduction
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.shared_MLP = nn.Sequential(
+            nn.Linear(in_features=c1, out_features=mid_channel),
+            nn.ReLU(),
+            nn.Linear(in_features=mid_channel, out_features=c1)
+        )
+        self.sigmoid = nn.Sigmoid()
+        #self.act=SiLU()
+    def forward(self, x):
+        avgout = self.shared_MLP(self.avg_pool(x).view(x.size(0),-1)).unsqueeze(2).unsqueeze(3)
+        maxout = self.shared_MLP(self.max_pool(x).view(x.size(0),-1)).unsqueeze(2).unsqueeze(3)
+        return self.sigmoid(avgout + maxout)
+       
+        
+class SpatialAttentionModule(nn.Module):
+    def __init__(self):
+        super(SpatialAttentionModule, self).__init__()
+        self.conv2d = nn.Conv2d(in_channels=2, out_channels=1, kernel_size=7, stride=1, padding=3) 
+        #self.act=SiLU()
+        self.sigmoid = nn.Sigmoid()
+    def forward(self, x):
+        avgout = torch.mean(x, dim=1, keepdim=True)
+        maxout, _ = torch.max(x, dim=1, keepdim=True)
+        out = torch.cat([avgout, maxout], dim=1)
+        out = self.sigmoid(self.conv2d(out))
+        return out
+
+
+class CBAM(nn.Module):
+    def __init__(self, c1, c2):
+        super(CBAM, self).__init__()
+        self.channel_attention = ChannelAttentionModule(c1)
+        self.spatial_attention = SpatialAttentionModule()
+
+    def forward(self, x):
+        out = self.channel_attention(x) * x
+        obj_map = self.spatial_attention(out)
+        out = obj_map * out
+        return out, torch.squeeze(obj_map, dim=1)
