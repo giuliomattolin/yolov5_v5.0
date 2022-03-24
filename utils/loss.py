@@ -3,8 +3,14 @@
 import torch
 import torch.nn as nn
 
-from utils.general import bbox_iou
+from utils.general import bbox_iou, xywh2xyxy, clip_coords
 from utils.torch_utils import is_parallel
+
+
+COCO_IMG_W = 640
+COCO_IMG_H = 480
+COCO_SMALL_T = 32
+COCO_MEDIUM_T = 96
 
 
 def smooth_BCE(eps=0.1):  # https://github.com/ultralytics/yolov3/issues/238#issuecomment-598028441
@@ -253,3 +259,142 @@ class ComputeDomainLoss:
         num_samples = torch.prod(torch.tensor(predictions.shape))
         accuracy = float(num_correct)/float(num_samples)*100
         return torch.tensor([accuracy]).to(scores.device)
+
+
+class ComputeAttentionLoss:
+    # Compute attention losses
+    def __init__(self, model):
+        h = model.hyp  # hyperparameters
+        self.device = next(model.parameters()).device  # get model device
+
+        # Define criteria
+        Dice = DiceLoss()
+
+        self.Dice, self.hyp = Dice, h 
+
+        det = model.module.model[-1] if is_parallel(model) else model.model[-1]  # Detect() module
+        for k in 'na', 'nl', 'anchors':
+            setattr(self, k, getattr(det, k))
+
+    def __call__(self, attn_maps, sep_targets):  # objectness maps, targets
+        lattn = [torch.zeros(1, device=self.device) for _ in range(len(attn_maps))]
+        tattn = self.build_targets(attn_maps, sep_targets)  # targets
+
+        # Losses
+        for i, attn_map in enumerate(attn_maps):
+            lattn[i] += self.Dice(attn_map, tattn[i])
+
+        # lattn *= self.hyp['attn']
+        # bs = ...  # batch size
+
+        # return lattn * bs, lattn.detach()
+
+        return sum(lattn)*0.005, torch.cat(lattn).detach()
+
+    def build_targets(self, attn_maps, sep_targets):
+        tattns = [torch.zeros([0]).to(self.device) for _ in range(len(attn_maps))]
+
+        for targets in sep_targets:
+            targets = targets.to(self.device)
+            # Build targets for compute_loss(), input targets(image,class,x,y,w,h)
+            na, nt = self.na, targets.shape[0]  # number of anchors, targets
+            gain = torch.ones(7, device=targets.device)  # normalized to gridspace gain
+            ai = torch.arange(na, device=targets.device).float().view(na, 1).repeat(1, nt)  # same as .repeat_interleave(nt)
+            targets = torch.cat((targets.repeat(na, 1, 1), ai[:, :, None]), 2)  # append anchor indices
+
+            for i in range(self.nl):
+                h, w = attn_maps[i].shape[1:]
+                attn_mask = torch.zeros((h, w)).to(self.device)
+                anchors = self.anchors[i]
+                gain[2:6] = torch.tensor([[w, h, w, h]])  # xyxy gain
+
+                # Match targets to anchors
+                t = targets * gain
+                if nt:
+                    # Matches
+                    r = t[:, :, 4:6] / anchors[:, None]  # wh ratio
+                    j = torch.max(r, 1. / r).max(2)[0] < self.hyp['anchor_t']  # compare
+                    # j = wh_iou(anchors, t[:, 4:6]) > model.hyp['iou_t']  # iou(3,n)=wh_iou(anchors(3,2), gwh(n,2))
+                    t = t[j]  # filter
+                    t = torch.unique(t[:, 2:6], dim=0)  # filter
+
+                    if len(t):
+                        # Define
+                        tbox = xywh2xyxy(t)
+                        clip_coords(tbox, (h, w))
+                        for xyxy in tbox:
+                            left = xyxy[0].round().int()
+                            top = xyxy[1].round().int()
+                            right = xyxy[2].round().int()
+                            bottom = xyxy[3].round().int()
+                            attn_mask[top:(bottom+1), left:(right+1)] = 1
+
+                # Append
+                tattns[i] = torch.cat((tattns[i], torch.unsqueeze(attn_mask, dim=0)), dim=0)
+
+        return tattns
+
+    def build_COCO_targets(self, attn_maps, sep_targets):
+        tattns = [torch.zeros([0]).to(self.device) for _ in range(len(attn_maps))]
+
+        for targets in sep_targets:
+            targets = targets.to(self.device)
+            # Build binary mask for compute_loss(), input targets(image,class,x,y,w,h)
+            small_t = (COCO_SMALL_T / COCO_IMG_W) * (COCO_SMALL_T / COCO_IMG_H)
+            medium_t = (COCO_MEDIUM_T / COCO_IMG_W) * (COCO_MEDIUM_T / COCO_IMG_H)
+            
+            small_mask = torch.zeros(targets.shape[0], device=targets.device, dtype=torch.bool)
+            medium_mask = torch.zeros(targets.shape[0], device=targets.device, dtype=torch.bool)
+            large_mask = torch.zeros(targets.shape[0], device=targets.device, dtype=torch.bool)
+
+            # Define
+            box_area = targets[:, 4] * targets[:, 5]
+            small_mask = small_mask.add((box_area < small_t))
+            medium_mask = medium_mask.add((box_area > small_t) & (box_area < medium_t))
+            large_mask = large_mask.add((box_area > medium_t))
+            masks = [small_mask, medium_mask, large_mask]
+            
+            nt = targets.shape[0]  # number of targets
+            gain = torch.ones(6, device=targets.device)  # normalized to gridspace gain
+
+            for i in range(self.nl):
+                h, w = attn_maps[i].shape[1:]
+                attn_mask = torch.zeros((h, w)).to(self.device)
+                gain[2:6] = torch.tensor([[w, h, w, h]])  # xyxy gain
+
+                # Match targets to anchors
+                t = targets * gain
+                if nt:
+                    # Matches
+                    t = t[masks[i]]
+                else:
+                    t = targets
+
+                # Define
+                tbox = xywh2xyxy(t[:, 2:6])
+                clip_coords(tbox, (h, w))
+                for xyxy in tbox:
+                    left = xyxy[0].round().int()
+                    top = xyxy[1].round().int()
+                    right = xyxy[2].round().int()
+                    bottom = xyxy[3].round().int()
+                    attn_mask[top:(bottom+1), left:(right+1)] = 1
+
+                # Append
+                tattns[i] = torch.cat((tattns[i], torch.unsqueeze(attn_mask, dim=0)), dim=0)
+
+        return tattns
+
+
+class DiceLoss(nn.Module):
+    def __init__(self, weight=None, size_average=True):
+        super(DiceLoss, self).__init__()
+
+    def forward(self, inputs, targets, smooth=1):
+        inputs = inputs.view(-1)
+        targets = targets.view(-1)
+        
+        intersection = (inputs * targets).sum()                            
+        dice = (2.*intersection + smooth)/(inputs.sum() + targets.sum() + smooth)  
+        
+        return 1 - dice

@@ -30,7 +30,7 @@ from utils.general import labels_to_class_weights, increment_path, labels_to_ima
     fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
     check_requirements, print_mutation, set_logging, one_cycle, colorstr
 from utils.google_utils import attempt_download
-from utils.loss import ComputeLoss, ComputeDomainLoss
+from utils.loss import ComputeLoss, ComputeDomainLoss, ComputeAttentionLoss
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
@@ -259,6 +259,7 @@ def train(hyp, opt, device, tb_writer=None):
     scaler = amp.GradScaler(enabled=cuda)
     compute_loss = ComputeLoss(model)  # init loss class
     compute_domain_loss = ComputeDomainLoss(model) # init domain loss class
+    compute_attn_loss = ComputeAttentionLoss(model)  # init attention loss class
     logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
                 f'Using {train_loader_s.num_workers + + train_loader_t.num_workers} dataloader workers\n'
                 f'Logging results to {save_dir}\n'
@@ -288,15 +289,16 @@ def train(hyp, opt, device, tb_writer=None):
         mloss = torch.zeros(4, device=device)  # mean losses
         madvloss = torch.zeros(3, device=device)  # mean adversarial losses
         madvaccuracy = torch.zeros(3, device=device)  # mean adversarial accuracies
+        mattnloss = torch.zeros(3, device=device) # mean attention losses
         if rank != -1:
             train_loader_s.sampler.set_epoch(epoch)
             train_loader_t.sampler.set_epoch(epoch)
         pbar = enumerate(zip(train_loader_s, train_loader_t))
-        logger.info(('\n' + '%10s' * 14) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', "l_small", "l_medium", "l_large", "a_small", "a_medium", "a_large", 'labels', 'img_size'))
+        logger.info(('\n' + '%10s' * 14) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', "ldis_sm", "ldis_md", "ldis_lg", "lattn_sm", "lattn_md", "lattn_lg", 'labels', 'img_size'))
         if rank in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
-        for i, ((imgs_s, targets_s, paths_s, _), (imgs_t, _, paths_t, _)) in pbar:  # batch -------------------------------------------------------------
+        for i, ((imgs_s, targets_s, paths_s, _, sep_targets_s), (imgs_t, _, paths_t, _)) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = torch.cat([imgs_s, imgs_t])
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
@@ -324,12 +326,13 @@ def train(hyp, opt, device, tb_writer=None):
             with amp.autocast(enabled=cuda):
                 r = ni / max_iterations
                 gamma = 2 / (1 + math.exp(-delta * r)) - 1
-                pred_s, domain_pred_s = model(
+                pred_s, domain_pred_s, attn_s = model(
                     imgs[: imgs_s.shape[0] //  opt.world_size], gamma=gamma, epoch=epoch
                 )  # forward
-                pred_t, domain_pred_t = model(
+                _, domain_pred_t, attn_t = model(
                     imgs[imgs_s.shape[0] // opt.world_size :], gamma=gamma, epoch=epoch
                 )  # forward
+
                 loss, loss_items = compute_loss(
                     pred_s, targets_s.to(device)
                 )  # loss scaled by batch_size
@@ -337,11 +340,16 @@ def train(hyp, opt, device, tb_writer=None):
                 domain_loss, domain_loss_items, domain_accuracy_items = compute_domain_loss(
                     domain_pred_s, domain_pred_t
                 )
+
+                attn_loss, attn_loss_items = compute_attn_loss(
+                    attn_s, sep_targets_s
+                ) # loss NOT scaled by batch_size
+                
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
                     loss *= 4.
-            total_loss = loss + domain_loss
+            total_loss = loss + domain_loss + attn_loss
 
             # Backward
             scaler.scale(total_loss).backward()
@@ -359,9 +367,10 @@ def train(hyp, opt, device, tb_writer=None):
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
                 madvloss = (madvloss * i + domain_loss_items) / (i + 1)  # update mean losses
                 madvaccuracy = (madvaccuracy * i + domain_accuracy_items) / (i + 1)  # update mean accuracies
+                mattnloss = (mattnloss * i + attn_loss_items) / (i + 1)  # update mean attention loss
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
                 s = ('%10s' * 2 + '%10.4g' * 12) % (
-                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, *madvloss, *madvaccuracy, targets_s.shape[0], imgs.shape[-1])
+                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, *madvloss, *mattnloss, targets_s.shape[0], imgs.shape[-1])
                 pbar.set_description(s)
 
                 # Plot
@@ -412,10 +421,11 @@ def train(hyp, opt, device, tb_writer=None):
             tags = ['train/box_loss', 'train/obj_loss', 'train/cls_loss',  # train loss
                     'train_adv/domain_loss_small', 'train_adv/domain_loss_medium', 'train_adv/domain_loss_large',  # adversarial train loss
                     'train_adv/domain_accuracy_small', 'train_adv/domain_accuracy_medium', 'train_adv/domain_accuracy_large',  # adversarial train accuracy
+                    'train_adv/attn_loss_small', 'train_adv/attn_loss_medium', 'train_adv/attn_loss_large', # attention loss
                     'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
                     'val/box_loss', 'val/obj_loss', 'val/cls_loss',  # val loss
                     'x/lr0', 'x/lr1', 'x/lr2']  # params
-            for x, tag in zip(list(mloss[:-1]) + list(madvloss) + list(madvaccuracy) + list(results) + lr, tags):
+            for x, tag in zip(list(mloss[:-1]) + list(madvloss) + list(madvaccuracy) + list(mattnloss) + list(results) + lr, tags):
                 if tb_writer:
                     tb_writer.add_scalar(tag, x, epoch)  # tensorboard
                 if wandb_logger.wandb:

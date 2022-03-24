@@ -129,7 +129,7 @@ class Model(nn.Module):
             return self.forward_once(x, profile, gamma=gamma, validation=validation, epoch=epoch)  # single-scale inference, train
 
     def forward_once(self, x, profile=False, gamma=0., validation=False, epoch=3):
-        y, dt, dis_out  = [], [], []  # outputs
+        y, dt, dis_out, obj_maps = [], [], [], []  # outputs
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
@@ -153,15 +153,16 @@ class Model(nn.Module):
                     obj_map = torch.repeat_interleave(obj_map, num_channels, dim=1)
                     weigh_feat_map = (1-gamma)*x + gamma*x*obj_map
                     dis_out.append(m(weigh_feat_map, epoch))
-            elif m.__class__.__name__ in ['C3TR', 'C3DETRTR']:
+            elif m.__class__.__name__ in ['C3TR', 'C3DETRTR', 'CBAM']:
                 x, obj_map = m(x)  # run
+                obj_maps.append(obj_map)
             else:
                 x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
 
         if profile:
             print('%.1fms total' % sum(dt))
-        return x if not dis_out else (x, dis_out)
+        return x if not dis_out else (x, dis_out, obj_maps)
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
         # https://arxiv.org/abs/1708.02002 section 3.3
@@ -235,7 +236,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
 
         n = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in [Conv, GhostConv, Bottleneck, GhostBottleneck, SPP, DWConv, MixConv2d, Focus, CrossConv, BottleneckCSP,
-                 C3, C3TR, C3DETRTR]:
+                 C3, C3TR, C3DETRTR, CBAM]:
             c1, c2 = ch[f], args[0]
             if c2 != no:  # if not output
                 c2 = make_divisible(c2 * gw, 8)
