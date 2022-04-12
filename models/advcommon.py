@@ -867,4 +867,4 @@ class CBAM(nn.Module):
         out = self.channel_attention(x) * x
         obj_map = self.spatial_attention(out)
         out = obj_map * out
-        return out, torch.squeeze(obj_map, dim=1)
+        return x, torch.squeeze(obj_map, dim=1), out

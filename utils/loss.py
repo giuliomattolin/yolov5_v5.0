@@ -243,7 +243,9 @@ class ComputeDomainLoss:
             losses[i] += self.BCE(torch.cat((sp[i], tp[i])), targets[i].to(device))
             accuracies[i] = self.compute_accuracies(torch.cat((sp[i], tp[i])), targets[i].to(device))
 
-        return sum(losses)/3., torch.cat(losses).detach(), torch.cat(accuracies).detach()
+        bs = sp[0].shape[0]
+        
+        return sum(losses)*bs*0.05, torch.cat(losses).detach(), torch.cat(accuracies).detach()
 
     def build_targets(self, sp, tp):
         # Build targets for compute_domain_loss()
@@ -278,18 +280,15 @@ class ComputeAttentionLoss:
 
     def __call__(self, attn_maps, sep_targets):  # objectness maps, targets
         lattn = [torch.zeros(1, device=self.device) for _ in range(len(attn_maps))]
-        tattn = self.build_targets(attn_maps, sep_targets)  # targets
+        tattn = self.build_COCO_targets(attn_maps, sep_targets)  # targets
 
         # Losses
         for i, attn_map in enumerate(attn_maps):
             lattn[i] += self.Dice(attn_map, tattn[i])
 
-        # lattn *= self.hyp['attn']
-        # bs = ...  # batch size
+        bs = attn_maps[0].shape[0]
 
-        # return lattn * bs, lattn.detach()
-
-        return sum(lattn)*0.005, torch.cat(lattn).detach()
+        return sum(lattn)*bs*0.005, torch.cat(lattn).detach()
 
     def build_targets(self, attn_maps, sep_targets):
         tattns = [torch.zeros([0]).to(self.device) for _ in range(len(attn_maps))]

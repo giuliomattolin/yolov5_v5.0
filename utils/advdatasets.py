@@ -71,7 +71,7 @@ def create_adv_dataloaders(path_s, path_t, imgsz, batch_size, stride, single_cls
                                       pad=pad,
                                       image_weights=image_weights,
                                       prefix=prefix)
-        dataset_t = LoadImagesWoLabels(path_t, imgsz, half_batch,
+        dataset_t = LoadImagesAndLabels(path_t, imgsz, half_batch,
                                       augment=augment,  # augment images
                                       hyp=hyp,  # augmentation hyperparameters
                                       rect=rect,  # rectangular training
@@ -99,7 +99,7 @@ def create_adv_dataloaders(path_s, path_t, imgsz, batch_size, stride, single_cls
                         num_workers=half_nw,
                         sampler=sampler_t,
                         pin_memory=True,
-                        collate_fn=LoadImagesWoLabels.collate_fn4 if quad else LoadImagesWoLabels.collate_fn)
+                        collate_fn=LoadImagesAndLabels.collate_fn4 if quad else LoadImagesAndLabels.collate_fn)
     return dataloader_s, dataset_s, dataloader_t, dataset_t
 
 

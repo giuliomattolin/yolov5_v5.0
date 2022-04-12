@@ -149,6 +149,8 @@ class C3TR(C3):
 class C3DETRTR(C3):
     pass
 
+class CBAM(C3):
+    pass
 
 class SPP(nn.Module):
     # Spatial pyramid pooling layer used in YOLOv3-SPP

@@ -28,10 +28,10 @@ from utils.autoanchor import check_anchors
 from utils.advdatasets import create_dataloader, create_adv_dataloaders
 from utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
     fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
-    check_requirements, print_mutation, set_logging, one_cycle, colorstr
+    check_requirements, print_mutation, set_logging, one_cycle, colorstr, non_max_suppression, box_iou, xywh2xyxy
 from utils.google_utils import attempt_download
 from utils.loss import ComputeLoss, ComputeDomainLoss, ComputeAttentionLoss
-from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
+from utils.plots import output_to_target, plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
 
@@ -59,7 +59,7 @@ def train(hyp, opt, device, tb_writer=None):
     # Configure
     plots = not opt.evolve  # create plots
     cuda = device.type != 'cpu'
-    init_seeds(2 + rank)
+    init_seeds()
     with open(opt.data) as f:
         data_dict = yaml.load(f, Loader=yaml.SafeLoader)  # data dict
     is_coco = opt.data.endswith('coco.yaml')
@@ -287,9 +287,11 @@ def train(hyp, opt, device, tb_writer=None):
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
         mloss = torch.zeros(4, device=device)  # mean losses
+        mloss_cutmix = torch.zeros(4, device=device)  # mean cutmix losses
         madvloss = torch.zeros(3, device=device)  # mean adversarial losses
         madvaccuracy = torch.zeros(3, device=device)  # mean adversarial accuracies
         mattnloss = torch.zeros(3, device=device) # mean attention losses
+        mattnloss_target = torch.zeros(3, device=device) # mean target attention losses
         if rank != -1:
             train_loader_s.sampler.set_epoch(epoch)
             train_loader_t.sampler.set_epoch(epoch)
@@ -298,7 +300,7 @@ def train(hyp, opt, device, tb_writer=None):
         if rank in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
-        for i, ((imgs_s, targets_s, paths_s, _, sep_targets_s), (imgs_t, _, paths_t, _)) in pbar:  # batch -------------------------------------------------------------
+        for i, ((imgs_s, targets_s, paths_s, _, sep_targets_s), (imgs_t, _, paths_t, _, sep_targets_t)) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = torch.cat([imgs_s, imgs_t])
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
@@ -326,15 +328,63 @@ def train(hyp, opt, device, tb_writer=None):
             with amp.autocast(enabled=cuda):
                 r = ni / max_iterations
                 gamma = 2 / (1 + math.exp(-delta * r)) - 1
+                
                 pred_s, domain_pred_s, attn_s = model(
                     imgs[: imgs_s.shape[0] //  opt.world_size], gamma=gamma
                 )  # forward
-                _, domain_pred_t, attn_t = model(
-                    imgs[imgs_s.shape[0] // opt.world_size :], gamma=gamma
+
+                pred_t, domain_pred_t, attn_t = model(
+                    imgs[imgs_s.shape[0] // opt.world_size :], gamma=gamma, pseudo=True
+                )  # forward
+
+                pseudo_t, pred_t = pred_t
+
+                # get labels with format xyxy scaled by img size
+                boxes = xywh2xyxy(targets_s[:,2:])
+                b, c, h, w = imgs_s.shape
+                boxes[:, [0, 2]] *= w  # scale to pixels
+                boxes[:, [1, 3]] *= h
+
+                # filter prediction to obtain pseudolabels with label format x,y,w,h
+                out = non_max_suppression(pseudo_t.detach(), conf_thres=0.25, iou_thres=0.5, multi_label=True if nc>1 else False)
+                out = output_to_target(out)
+
+                # get indices of overlapping labels with iou_thresh > 0.5
+                if out.size:
+                    ious = box_iou(torch.from_numpy(xywh2xyxy(out[:, 2:6])), boxes) # rows are predictions and columns are labels
+                    idx_overlap = (ious > 0.5).nonzero().T[1]
+                    idx_overlap = torch.unique(idx_overlap)
+
+                    targets_cutmix = torch.from_numpy(out[:, :6])
+                    targets_cutmix[:, [2, 4]] /= w  # normalize to pixels
+                    targets_cutmix[:, [3, 5]] /= h
+                else:
+                    idx_overlap = []
+                    targets_cutmix = torch.empty([0, 6])
+
+                # create binary mask for non-overlapping source objects (1s on the objects and 0s otherwise)
+                mask = torch.zeros((b, c, h, w))
+                for i, box in enumerate(boxes):
+                    if i not in idx_overlap:
+                        mask[:, :, int(torch.round(box[1])):int(torch.round(box[3]))+1, int(torch.round(box[0])):int(torch.round(box[2]))+1] = 1. 
+
+                # add non-overlapping source objects to target image and add their labels
+                imgs_cutmix = imgs_t*((mask-1)*-1) + imgs_s*mask
+                imgs_cutmix = imgs_cutmix.to(device, non_blocking=True).float() / 255.0
+                for i, target in enumerate(targets_s):
+                    if i not in idx_overlap:
+                        targets_cutmix = torch.cat((targets_cutmix, torch.unsqueeze(target, 0)))
+
+                pred_cutmix, domain_pred_cutmix, attn_cutmix = model(
+                    imgs_cutmix, gamma=gamma
                 )  # forward
 
                 loss, loss_items = compute_loss(
                     pred_s, targets_s.to(device)
+                )  # loss scaled by batch_size
+
+                loss_cutmix, loss_items_cutmix = compute_loss(
+                    pred_cutmix, targets_cutmix.to(device)
                 )  # loss scaled by batch_size
                 
                 domain_loss, domain_loss_items, domain_accuracy_items = compute_domain_loss(
@@ -345,11 +395,15 @@ def train(hyp, opt, device, tb_writer=None):
                     attn_s, sep_targets_s
                 ) # loss NOT scaled by batch_size
                 
+                _, attn_loss_items_target = compute_attn_loss(
+                    attn_t, sep_targets_t
+                )
+                
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
                     loss *= 4.
-            total_loss = loss + domain_loss + attn_loss
+            total_loss = loss + domain_loss + attn_loss + loss_cutmix
 
             # Backward
             scaler.scale(total_loss).backward()
@@ -365,9 +419,11 @@ def train(hyp, opt, device, tb_writer=None):
             # Print
             if rank in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                mloss_cutmix = (mloss_cutmix * i + loss_items_cutmix) / (i + 1)  # update mean losses
                 madvloss = (madvloss * i + domain_loss_items) / (i + 1)  # update mean losses
                 madvaccuracy = (madvaccuracy * i + domain_accuracy_items) / (i + 1)  # update mean accuracies
                 mattnloss = (mattnloss * i + attn_loss_items) / (i + 1)  # update mean attention loss
+                mattnloss_target = (mattnloss_target * i + attn_loss_items_target) / (i + 1)  # update mean attention loss
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
                 s = ('%10s' * 2 + '%10.4g' * 12) % (
                     '%g/%g' % (epoch, epochs - 1), mem, *mloss, *madvloss, *mattnloss, targets_s.shape[0], imgs.shape[-1])
@@ -376,7 +432,13 @@ def train(hyp, opt, device, tb_writer=None):
                 # Plot
                 if plots and ni < 3:
                     f = save_dir / f'train_batch{ni}.jpg'  # filename
-                    Thread(target=plot_images, args=(imgs_s, targets_s, paths_s, f), daemon=True).start()
+                    plot_images(imgs_s, targets_s, paths_s, f)
+
+                    f = save_dir / f'train_pred{ni}.jpg'  # filename
+                    plot_images(imgs_t, out[:,:6], "", f)
+
+                    f = save_dir / f'train_cutmix{ni}.jpg'  # filename
+                    plot_images(imgs_cutmix, targets_cutmix, "", f)
                     # if tb_writer:
                     #     tb_writer.add_image(f, result, dataformats='HWC', global_step=epoch)
                     #     tb_writer.add_graph(torch.jit.trace(model, imgs, strict=False), [])  # add model graph
@@ -386,6 +448,10 @@ def train(hyp, opt, device, tb_writer=None):
 
             # end batch ------------------------------------------------------------------------------------------------
         # end epoch ----------------------------------------------------------------------------------------------------
+
+        print("Detection Loss: {}, Domanin Loss: {}, Attention Loss: {}, Consistency Loss: {}".format(
+            round(loss.item(), 4), round(domain_loss.item(), 4), round(attn_loss.item(), 4), round(loss_cutmix.item(), 4))
+        )
 
         # Scheduler
         lr = [x['lr'] for x in optimizer.param_groups]  # for tensorboard
@@ -419,13 +485,15 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Log
             tags = ['train/box_loss', 'train/obj_loss', 'train/cls_loss',  # train loss
+                    'cutmix/box_loss', 'cutmix/obj_loss', 'cutmix/cls_loss',  # train loss
                     'train_adv/domain_loss_small', 'train_adv/domain_loss_medium', 'train_adv/domain_loss_large',  # adversarial train loss
                     'train_adv/domain_accuracy_small', 'train_adv/domain_accuracy_medium', 'train_adv/domain_accuracy_large',  # adversarial train accuracy
                     'train_adv/attn_loss_small', 'train_adv/attn_loss_medium', 'train_adv/attn_loss_large', # attention loss
+                    'train_adv/attn_loss_small_target', 'train_adv/attn_loss_medium_target', 'train_adv/attn_loss_large_target', # target attention loss
                     'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
                     'val/box_loss', 'val/obj_loss', 'val/cls_loss',  # val loss
                     'x/lr0', 'x/lr1', 'x/lr2']  # params
-            for x, tag in zip(list(mloss[:-1]) + list(madvloss) + list(madvaccuracy) + list(mattnloss) + list(results) + lr, tags):
+            for x, tag in zip(list(mloss[:-1]) + list(mloss_cutmix[:-1]) + list(madvloss) + list(madvaccuracy) + list(mattnloss) + list(mattnloss_target) + list(results) + lr, tags):
                 if tb_writer:
                     tb_writer.add_scalar(tag, x, epoch)  # tensorboard
                 if wandb_logger.wandb:

@@ -43,7 +43,7 @@ class Detect(nn.Module):
         self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
         self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv
 
-    def forward(self, x):
+    def forward(self, x, pseudo):
         # x = x.copy()  # for profiling
         z = []  # inference output
         self.training |= self.export
@@ -52,7 +52,7 @@ class Detect(nn.Module):
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
 
-            if not self.training:  # inference
+            if not self.training or pseudo:  # inference
                 if self.grid[i].shape[2:4] != x[i].shape[2:4]:
                     self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
 
@@ -61,7 +61,7 @@ class Detect(nn.Module):
                 y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
                 z.append(y.view(bs, -1, self.no))
 
-        return x if self.training else (torch.cat(z, 1), x)
+        return x if self.training and not pseudo else (torch.cat(z, 1), x)
 
     @staticmethod
     def _make_grid(nx=20, ny=20):
@@ -108,7 +108,7 @@ class Model(nn.Module):
         self.info()
         logger.info('')
 
-    def forward(self, x, augment=False, profile=False, gamma=0., validation=False):
+    def forward(self, x, augment=False, profile=False, gamma=0., validation=False, pseudo=False):
         if augment:
             img_size = x.shape[-2:]  # height, width
             s = [1, 0.83, 0.67]  # scales
@@ -126,9 +126,9 @@ class Model(nn.Module):
                 y.append(yi)
             return torch.cat(y, 1), None  # augmented inference, train
         else:
-            return self.forward_once(x, profile, gamma=gamma, validation=validation)  # single-scale inference, train
+            return self.forward_once(x, profile, gamma=gamma, validation=validation, pseudo=pseudo)  # single-scale inference, train
 
-    def forward_once(self, x, profile=False, gamma=0., validation=False):
+    def forward_once(self, x, profile=False, gamma=0., validation=False, pseudo=False):
         y, dt, dis_out, obj_maps = [], [], [], []  # outputs
         for m in self.model:
             if m.f != -1:  # if not from previous layer
@@ -144,18 +144,13 @@ class Model(nn.Module):
 
             if m.__class__.__name__ in ['DiscriminatorConv']:
                 if not validation:
-                    num_channels = torch.tensor(x.shape[1])
-                    # NxHxW to Nx1xHxW
-                    obj_map = torch.unsqueeze(obj_map, 1)
-                    if obj_map.get_device() != -1:
-                        num_channels = num_channels.to(obj_map.get_device()) 
-                    # Nx1xHxW to Nx3xHxW
-                    obj_map = torch.repeat_interleave(obj_map, num_channels, dim=1)
-                    weigh_feat_map = (1-gamma)*x + gamma*x*obj_map
+                    weigh_feat_map = (1-gamma)*x + gamma*x*out
                     dis_out.append(m(weigh_feat_map))
             elif m.__class__.__name__ in ['C3TR', 'C3DETRTR', 'CBAM']:
-                x, obj_map = m(x)  # run
+                x, obj_map, out = m(x)  # run
                 obj_maps.append(obj_map)
+            elif m.__class__.__name__ in ['Detect']:
+                x = m(x, pseudo)
             else:
                 x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
