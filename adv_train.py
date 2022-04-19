@@ -346,7 +346,7 @@ def train(hyp, opt, device, tb_writer=None):
                 boxes[:, [1, 3]] *= h
 
                 # filter prediction to obtain pseudolabels with label format x,y,w,h
-                out = non_max_suppression(pseudo_t.detach(), conf_thres=0.25, iou_thres=0.5, multi_label=True if nc>1 else False)
+                out = non_max_suppression(pseudo_t.detach(), conf_thres=0.25, iou_thres=0.5, multi_label=True)
                 out = output_to_target(out)
 
                 # get indices of overlapping labels with iou_thresh > 0.5
@@ -364,15 +364,15 @@ def train(hyp, opt, device, tb_writer=None):
 
                 # create binary mask for non-overlapping source objects (1s on the objects and 0s otherwise)
                 mask = torch.zeros((b, c, h, w))
-                for i, box in enumerate(boxes):
-                    if i not in idx_overlap:
+                for j, box in enumerate(boxes):
+                    if j not in idx_overlap:
                         mask[:, :, int(torch.round(box[1])):int(torch.round(box[3]))+1, int(torch.round(box[0])):int(torch.round(box[2]))+1] = 1. 
 
                 # add non-overlapping source objects to target image and add their labels
                 imgs_cutmix = imgs_t*((mask-1)*-1) + imgs_s*mask
                 imgs_cutmix = imgs_cutmix.to(device, non_blocking=True).float() / 255.0
-                for i, target in enumerate(targets_s):
-                    if i not in idx_overlap:
+                for j, target in enumerate(targets_s):
+                    if j not in idx_overlap:
                         targets_cutmix = torch.cat((targets_cutmix, torch.unsqueeze(target, 0)))
 
                 pred_cutmix, domain_pred_cutmix, attn_cutmix = model(
@@ -403,7 +403,9 @@ def train(hyp, opt, device, tb_writer=None):
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
                     loss *= 4.
-            total_loss = loss + domain_loss + attn_loss + loss_cutmix
+
+                loss_cutmix *= 0.1
+            total_loss = loss + loss_cutmix + domain_loss + attn_loss
 
             # Backward
             scaler.scale(total_loss).backward()
@@ -430,14 +432,15 @@ def train(hyp, opt, device, tb_writer=None):
                 pbar.set_description(s)
 
                 # Plot
-                if plots and ni < 3:
-                    f = save_dir / f'train_batch{ni}.jpg'  # filename
+                if plots and i == 0 and epoch < 10:
+                    f = save_dir / f'train_batch{epoch}.jpg'  # filename
                     plot_images(imgs_s, targets_s, paths_s, f)
+                    
+                    if out.size:
+                        f = save_dir / f'train_pred{epoch}.jpg'  # filename
+                        plot_images(imgs_t, out, paths_t, f)
 
-                    f = save_dir / f'train_pred{ni}.jpg'  # filename
-                    plot_images(imgs_t, out[:,:6], "", f)
-
-                    f = save_dir / f'train_cutmix{ni}.jpg'  # filename
+                    f = save_dir / f'train_cutmix{epoch}.jpg'  # filename
                     plot_images(imgs_cutmix, targets_cutmix, "", f)
                     # if tb_writer:
                     #     tb_writer.add_image(f, result, dataformats='HWC', global_step=epoch)

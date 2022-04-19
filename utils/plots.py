@@ -123,7 +123,7 @@ def plot_images(images, targets, paths=None, fname='images.jpg', names=None, max
     if np.max(images[0]) <= 1:
         images *= 255
 
-    tl = 3  # line thickness
+    tl = 2  # line thickness
     tf = max(tl - 1, 1)  # font thickness
     bs, _, h, w = images.shape  # batch size, _, height, width
     bs = min(bs, max_subplots)  # limit plot images
