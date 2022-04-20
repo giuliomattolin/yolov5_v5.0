@@ -28,7 +28,7 @@ from utils.autoanchor import check_anchors
 from utils.advdatasets import create_dataloader, create_adv_dataloaders
 from utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
     fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
-    check_requirements, print_mutation, set_logging, one_cycle, colorstr, non_max_suppression, box_iou, xywh2xyxy
+    check_requirements, print_mutation, set_logging, one_cycle, colorstr, non_max_suppression, xywh2xyxy, intersection
 from utils.google_utils import attempt_download
 from utils.loss import ComputeLoss, ComputeDomainLoss, ComputeAttentionLoss
 from utils.plots import output_to_target, plot_images, plot_labels, plot_results, plot_evolution
@@ -351,8 +351,8 @@ def train(hyp, opt, device, tb_writer=None):
 
                 # get indices of overlapping labels with iou_thresh > 0.5
                 if out.size:
-                    ious = box_iou(torch.from_numpy(xywh2xyxy(out[:, 2:6])), boxes) # rows are predictions and columns are labels
-                    idx_overlap = (ious > 0.5).nonzero().T[1]
+                    inter = intersection(torch.from_numpy(xywh2xyxy(out[:, 2:6])), boxes) # rows are predictions and columns are labels
+                    idx_overlap = (inter > 0.5).nonzero().T[1]
                     idx_overlap = torch.unique(idx_overlap)
 
                     targets_cutmix = torch.from_numpy(out[:, :6])
