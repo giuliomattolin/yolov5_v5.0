@@ -340,6 +340,15 @@ def clip_coords(boxes, img_shape):
     boxes[:, 3].clamp_(0, img_shape[0])  # y2
 
 
+def clip_coords_target(target, w0, w1):
+    # Clip bounding xywh bounding boxes to image shape (height, width)
+    temp_coords = xywh2xyxy(target[:,2:6])
+    temp_coords[:, 0].clamp_(w0, w1)  # x1
+    temp_coords[:, 1].clamp_(0, 1)  # y1
+    temp_coords[:, 2].clamp_(w0, w1)  # x2
+    temp_coords[:, 3].clamp_(0, 1)  # y2
+    target[:,2:6] = xyxy2xywh(temp_coords)
+
 def bbox_iou(box1, box2, x1y1x2y2=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7):
     # Returns the IoU of box1 to box2. box1 is 4, box2 is nx4
     box2 = box2.T

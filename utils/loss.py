@@ -5,6 +5,7 @@ import torch.nn as nn
 
 from utils.general import bbox_iou, xywh2xyxy, clip_coords
 from utils.torch_utils import is_parallel
+import math
 
 
 COCO_IMG_W = 640
@@ -117,7 +118,7 @@ class ComputeLoss:
         for k in 'na', 'nc', 'nl', 'anchors':
             setattr(self, k, getattr(det, k))
 
-    def __call__(self, p, targets):  # predictions, targets, model
+    def __call__(self, p, targets, var=None):  # predictions, targets, model
         device = targets.device
         lcls, lbox, lobj = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
         tcls, tbox, indices, anchors = self.build_targets(p, targets)  # targets
@@ -136,7 +137,15 @@ class ComputeLoss:
                 pwh = (ps[:, 2:4].sigmoid() * 2) ** 2 * anchors[i]
                 pbox = torch.cat((pxy, pwh), 1)  # predicted box
                 iou = bbox_iou(pbox.T, tbox[i], x1y1x2y2=False, CIoU=True)  # iou(prediction, target)
-                lbox += (1.0 - iou).mean()  # iou loss
+                if var:
+                    vars = var[i][b, a, gj, gi]
+                    
+                    lbox_xy = -torch.log(self.Gaussian(tbox[i][..., :2], pbox[..., :2], vars[..., :2]) + 10**-9)/2.0
+                    lbox_wh = -torch.log(self.Gaussian(tbox[i][..., 2:], pbox[..., 2:], vars[..., 2:]) + 10**-9)/2.0
+                    # lbox += torch.unsqueeze(torch.mean(torch.cat((lbox_xy, lbox_wh), axis=1).sum(axis=1)), axis=0) * 0.01
+                    lbox += torch.unsqueeze((torch.cat((lbox_xy, lbox_wh), axis=1).sum(axis=1)).sum(), axis=0)
+                else:
+                    lbox += (1.0 - iou).mean()  # iou loss
 
                 # Objectness
                 tobj[b, a, gj, gi] = (1.0 - self.gr) + self.gr * iou.detach().clamp(0).type(tobj.dtype)  # iou ratio
@@ -158,7 +167,8 @@ class ComputeLoss:
 
         if self.autobalance:
             self.balance = [x / self.balance[self.ssi] for x in self.balance]
-        lbox *= self.hyp['box']
+        lbox *= 0.0005
+        # lbox *= self.hyp['box']
         lobj *= self.hyp['obj']
         lcls *= self.hyp['cls']
         bs = tobj.shape[0]  # batch size
@@ -220,6 +230,17 @@ class ComputeLoss:
             tcls.append(c)  # class
 
         return tcls, tbox, indices, anch
+
+    def Gaussian(self, y, mu, var):
+        var = torch.sigmoid(var)
+        
+        eps = 0.3
+        result = (y-mu)/var
+        result = (result**2)/2*(-1)
+        exp = torch.exp(result)
+        result = exp/(math.sqrt(2*math.pi))/(var + eps)
+
+        return result
 
 
 class ComputeDomainLoss:

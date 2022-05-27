@@ -34,7 +34,7 @@ class Detect(nn.Module):
     def __init__(self, nc=80, anchors=(), ch=()):  # detection layer
         super(Detect, self).__init__()
         self.nc = nc  # number of classes
-        self.no = nc + 5  # number of outputs per anchor
+        self.no = nc + 9  # number of outputs per anchor (9: add 4 variances to x,y,w,h,p)
         self.nl = len(anchors)  # number of detection layers
         self.na = len(anchors[0]) // 2  # number of anchors
         self.grid = [torch.zeros(1)] * self.nl  # init grid
@@ -46,11 +46,16 @@ class Detect(nn.Module):
     def forward(self, x, pseudo):
         # x = x.copy()  # for profiling
         z = []  # inference output
+        v = []  # variance output
         self.training |= self.export
         for i in range(self.nl):
             x[i] = self.m[i](x[i])  # conv
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
+            
+            v.append(x[i][..., -4:])
+            if not pseudo:
+                x[i] = x[i][..., :-4]
 
             if not self.training or pseudo:  # inference
                 if self.grid[i].shape[2:4] != x[i].shape[2:4]:
@@ -59,9 +64,22 @@ class Detect(nn.Module):
                 y = x[i].sigmoid()
                 y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i]) * self.stride[i]  # xy
                 y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
-                z.append(y.view(bs, -1, self.no))
+                if pseudo:
+                    y = y.view(bs, -1, self.no)
+                    y[..., 4] = y[..., 4].detach() * (1-torch.mean(y[..., -4:], axis=2)).detach()
+                    y = y[..., :-4] # remove uncertainties
+                    z.append(y)
 
-        return x if self.training and not pseudo else (torch.cat(z, 1), x)
+                    x[i] = x[i][..., :-4]
+                else:
+                    z.append(y.view(bs, -1, self.nc + 5))
+
+        if self.training and not pseudo:
+            return x
+        elif pseudo:
+            return (torch.cat(z, 1), x, v)
+        else:
+            return (torch.cat(z, 1), x)
 
     @staticmethod
     def _make_grid(nx=20, ny=20):
@@ -108,7 +126,7 @@ class Model(nn.Module):
         self.info()
         logger.info('')
 
-    def forward(self, x, augment=False, profile=False, gamma=0., validation=False, pseudo=False):
+    def forward(self, x, augment=False, profile=False, gamma=1, validation=False, pseudo=False):
         if augment:
             img_size = x.shape[-2:]  # height, width
             s = [1, 0.83, 0.67]  # scales
@@ -128,7 +146,7 @@ class Model(nn.Module):
         else:
             return self.forward_once(x, profile, gamma=gamma, validation=validation, pseudo=pseudo)  # single-scale inference, train
 
-    def forward_once(self, x, profile=False, gamma=0., validation=False, pseudo=False):
+    def forward_once(self, x, profile=False, gamma=1, validation=False, pseudo=False):
         y, dt, dis_out, obj_maps = [], [], [], []  # outputs
         for m in self.model:
             if m.f != -1:  # if not from previous layer

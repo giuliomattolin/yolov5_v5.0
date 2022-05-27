@@ -28,7 +28,7 @@ from utils.autoanchor import check_anchors
 from utils.advdatasets import create_dataloader, create_adv_dataloaders
 from utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
     fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
-    check_requirements, print_mutation, set_logging, one_cycle, colorstr, non_max_suppression, xywh2xyxy, intersection
+    check_requirements, print_mutation, set_logging, one_cycle, colorstr, non_max_suppression, clip_coords_target
 from utils.google_utils import attempt_download
 from utils.loss import ComputeLoss, ComputeDomainLoss, ComputeAttentionLoss
 from utils.plots import output_to_target, plot_images, plot_labels, plot_results, plot_evolution
@@ -323,64 +323,89 @@ def train(hyp, opt, device, tb_writer=None):
                 if sf != 1:
                     ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
                     imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
-
+            
             # Forward
             with amp.autocast(enabled=cuda):
                 r = ni / max_iterations
                 gamma = 2 / (1 + math.exp(-delta * r)) - 1
                 
                 pred_s, domain_pred_s, attn_s = model(
-                    imgs[: imgs_s.shape[0] //  opt.world_size], gamma=gamma
+                    imgs[: imgs_s.shape[0] //  opt.world_size], gamma=gamma, pseudo=True
                 )  # forward
+
+                pseudo_s, pred_s, var_s = pred_s # pseudo with calibrated confidence
 
                 pred_t, domain_pred_t, attn_t = model(
                     imgs[imgs_s.shape[0] // opt.world_size :], gamma=gamma, pseudo=True
                 )  # forward
 
-                pseudo_t, pred_t = pred_t
-
-                # get labels with format xyxy scaled by img size
-                boxes = xywh2xyxy(targets_s[:,2:])
-                b, c, h, w = imgs_s.shape
-                boxes[:, [0, 2]] *= w  # scale to pixels
-                boxes[:, [1, 3]] *= h
+                pseudo_t, pred_t, var_t = pred_t # pseudo with calibrated confidence
 
                 # filter prediction to obtain pseudolabels with label format x,y,w,h
-                out = non_max_suppression(pseudo_t.detach(), conf_thres=0.25, iou_thres=0.5, multi_label=True)
+                out_s = non_max_suppression(pseudo_s.detach(), conf_thres=0.25, iou_thres=0.5, multi_label=False)
+                out_s = output_to_target(out_s)
+
+                # filter prediction to obtain pseudolabels with label format x,y,w,h
+                out = non_max_suppression(pseudo_t.detach(), conf_thres=0.25, iou_thres=0.5, multi_label=False)
                 out = output_to_target(out)
 
-                # get indices of overlapping labels with iou_thresh > 0.5
-                if out.size:
-                    inter = intersection(torch.from_numpy(xywh2xyxy(out[:, 2:6])), boxes) # rows are predictions and columns are labels
-                    idx_overlap = (inter > 0.5).nonzero().T[1]
-                    idx_overlap = torch.unique(idx_overlap)
-
-                    targets_cutmix = torch.from_numpy(out[:, :6])
-                    targets_cutmix[:, [2, 4]] /= w  # normalize to pixels
-                    targets_cutmix[:, [3, 5]] /= h
+                b, c, h, w = imgs_s.shape
+                if out_s.size:
+                    out_s = torch.from_numpy(out_s)
+                    out_s[:, [2, 4]] /= w  # normalize to pixels
+                    out_s[:, [3, 5]] /= h
                 else:
-                    idx_overlap = []
-                    targets_cutmix = torch.empty([0, 6])
+                    out_s = torch.empty([0,7])
 
-                # create binary mask for non-overlapping source objects (1s on the objects and 0s otherwise)
+                if out.size:
+                    out = torch.from_numpy(out)
+                    out[:, [2, 4]] /= w  # normalize to pixels
+                    out[:, [3, 5]] /= h
+                else:
+                    out = torch.empty([0,7])
+
+                x_cut = int(np.random.normal(w/2, w*0.15, 1))
+                t_right = x_cut > w/2 # add target image to smaller side
+
                 mask = torch.zeros((b, c, h, w))
-                for j, box in enumerate(boxes):
-                    if j not in idx_overlap:
-                        mask[:, :, int(torch.round(box[1])):int(torch.round(box[3]))+1, int(torch.round(box[0])):int(torch.round(box[2]))+1] = 1. 
+                if t_right:
+                    mask[:, :, :, x_cut:] = 1.
 
-                # add non-overlapping source objects to target image and add their labels
-                imgs_cutmix = imgs_t*((mask-1)*-1) + imgs_s*mask
-                imgs_cutmix = imgs_cutmix.to(device, non_blocking=True).float() / 255.0
-                for j, target in enumerate(targets_s):
-                    if j not in idx_overlap:
-                        targets_cutmix = torch.cat((targets_cutmix, torch.unsqueeze(target, 0)))
+                    targets_cutmix_s = out_s[out_s[:,2] * w < x_cut, :]
+                    targets_cutmix_t = out[out[:,2] * w >= x_cut, :]
+
+                    cutmix_weight = (torch.cat((targets_cutmix_s, targets_cutmix_t))[:,6] > 0.5).sum() / \
+                                    (torch.cat((targets_cutmix_s, targets_cutmix_t))[:,6] > 0.5).nelement()
+
+                    targets_cutmix_s = targets_cutmix_s[:,:6]
+                    targets_cutmix_t = targets_cutmix_t[:,:6]
+                    clip_coords_target(targets_cutmix_s, 0, x_cut/2)
+                    clip_coords_target(targets_cutmix_t, x_cut/w, 1)
+                else:
+                    mask[:, :, :, :x_cut+1] = 1.
+
+                    targets_cutmix_s = out_s[out_s[:,2] * w >= x_cut, :]
+                    targets_cutmix_t = out[out[:,2] * w < x_cut, :]
+
+                    cutmix_weight = (torch.cat((targets_cutmix_s, targets_cutmix_t))[:,6] > 0.5).sum() / \
+                                    (torch.cat((targets_cutmix_s, targets_cutmix_t))[:,6] > 0.5).nelement()
+
+                    targets_cutmix_s = targets_cutmix_s[:,:6]
+                    targets_cutmix_t = targets_cutmix_t[:,:6]
+                    clip_coords_target(targets_cutmix_s, x_cut/w, 1)
+                    clip_coords_target(targets_cutmix_t, 0, x_cut/w)
+
+                imgs_cutmix = imgs_s*((mask-1)*-1) + imgs_t*mask
+                imgs_cutmix = imgs_cutmix.to(device, non_blocking=True).float() / 255.0                    
+
+                targets_cutmix = torch.cat((targets_cutmix_s, targets_cutmix_t))
 
                 pred_cutmix, domain_pred_cutmix, attn_cutmix = model(
                     imgs_cutmix, gamma=gamma
                 )  # forward
 
                 loss, loss_items = compute_loss(
-                    pred_s, targets_s.to(device)
+                    pred_s, targets_s.to(device), var_s
                 )  # loss scaled by batch_size
 
                 loss_cutmix, loss_items_cutmix = compute_loss(
@@ -404,8 +429,8 @@ def train(hyp, opt, device, tb_writer=None):
                 if opt.quad:
                     loss *= 4.
 
-                loss_cutmix *= 0.1
-            total_loss = loss + loss_cutmix + domain_loss + attn_loss
+                loss_cutmix *= torch.nan_to_num(cutmix_weight)
+            total_loss = loss
 
             # Backward
             scaler.scale(total_loss).backward()
@@ -430,17 +455,25 @@ def train(hyp, opt, device, tb_writer=None):
                 s = ('%10s' * 2 + '%10.4g' * 12) % (
                     '%g/%g' % (epoch, epochs - 1), mem, *mloss, *madvloss, *mattnloss, targets_s.shape[0], imgs.shape[-1])
                 pbar.set_description(s)
-
+                
                 # Plot
-                if plots and i == 0 and epoch < 10:
-                    f = save_dir / f'train_batch{epoch}.jpg'  # filename
+                if plots and i==0:
+                    f = save_dir / f'train_batch{i}.jpg'  # filename
                     plot_images(imgs_s, targets_s, paths_s, f)
-                    
-                    if out.size:
-                        f = save_dir / f'train_pred{epoch}.jpg'  # filename
-                        plot_images(imgs_t, out, paths_t, f)
 
-                    f = save_dir / f'train_cutmix{epoch}.jpg'  # filename
+                    out_s[:, [2, 4]] *= w  # normalize to pixels
+                    out_s[:, [3, 5]] *= h
+                    f = save_dir / f'train_pred_s{i}.jpg'  # filename
+                    plot_images(imgs_s, out_s, paths_s, f)
+
+                    out[:, [2, 4]] *= w  # normalize to pixels
+                    out[:, [3, 5]] *= h
+                    f = save_dir / f'train_pred_t{i}.jpg'  # filename
+                    plot_images(imgs_t, out, paths_t, f)
+
+                    targets_cutmix[:, [2, 4]] *= w
+                    targets_cutmix[:, [3, 5]] *= h
+                    f = save_dir / f'train_cutmix{i}.jpg'  # filename
                     plot_images(imgs_cutmix, targets_cutmix, "", f)
                     # if tb_writer:
                     #     tb_writer.add_image(f, result, dataformats='HWC', global_step=epoch)
